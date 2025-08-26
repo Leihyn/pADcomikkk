@@ -191,5 +191,7 @@ interface IComicPad {
 
     function getUSDTAddress() external view returns (address usdtAddress);
 
+    function getComicNFTAddress() external view returns (address comicNFTAddress);
+
     function getPlatformFeePercentage() external view returns (uint256 feePercentage);
 }

@@ -4,9 +4,10 @@ pragma solidity ^0.8.19;
 import "forge-std/Test.sol";
 import "../src/ComicNFT.sol";
 import "../src/ComicPadV1.sol";
-import "@openzeppelin/contracts/mocks/ERC20Mock.sol";
+import "../src/ComicPadProxy.sol";
 import "../src/interfaces/IComicPad.sol";
-import "@openzeppelin/contracts/token/ERC20/ERC20.sol";
+
+import "@openzeppelin/contracts/mocks/token/ERC20Mock.sol";
 
 
 contract ComicPadTest is Test {
@@ -16,12 +17,10 @@ contract ComicPadTest is Test {
     address public reader = address(0x3);
     address public treasury = address(0x4);
 
-    MockUSDT public usdt;
+    ERC20Mock public usdt;
     ComicNFT public comicNFT;
     ComicPadV1 public comicPadV1;
-    ComicPadV2 public comicPadv2;
     ComicPadProxy public proxy;
-    ComicPadUpgrader public upgrader;
     IComicPad public comicPad;
 
     string[] public testGenres;
@@ -39,7 +38,8 @@ contract ComicPadTest is Test {
         vm.label(treasury, "Treasury");
 
         // mo ck Usdt
-        usdt = new ERC20Mock("Mock USDT", "USDT", address(this), 1000000 * 10**6);
+        usdt = new ERC20Mock();
+        usdt.mint(address(this), 1000000 * 10**6);
         vm.label(address(usdt), "MockUSDT");
 
         // TEST genres

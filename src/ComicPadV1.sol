@@ -425,7 +425,7 @@ contract ComicPadV1 is
 
     // ==== EARNINGS & TRACKING FUNCTIONS ======
     function getCreatorEarnings(address creator) external view override returns (EarningsData memory earnings) {
-        creatorEarnings[creator];
+        return creatorEarnings[creator];
     }
 
     function getProjectEarnings(uint256 projectId) external view override returns (EarningsData memory earnings) {
