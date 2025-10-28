@@ -1,0 +1,23 @@
+Comic Pad Debug Report
+Generated: Mon, Oct 27, 2025  6:56:48 PM
+================================
+
+System Information:
+OS: MINGW64_NT-10.0-26100
+Node.js: v18.20.8
+npm: 10.8.2
+
+Service Status:
+Backend: Not running
+Frontend: Not running
+
+Environment Files:
+Backend .env: Missing
+Frontend .env: Missing
+
+Dependencies:
+Backend node_modules: Missing
+Frontend node_modules: Missing
+
+Port Usage:
+No processes found on ports 3000/3001

@@ -1,0 +1,46 @@
+{
+  "name": "comic-pad-backend",
+  "version": "1.0.0",
+  "description": "Comic Pad Backend - Hedera-based NFT Comic Platform",
+  "main": "src/server.js",
+  "scripts": {
+    "start": "node src/server.js",
+    "dev": "nodemon src/server.js",
+    "test": "jest",
+    "build": "echo 'No build step required'"
+  },
+  "dependencies": {
+    "@hashgraph/sdk": "^2.7.0",
+    "express": "^4.18.2",
+    "cors": "^2.8.5",
+    "helmet": "^7.1.0",
+    "dotenv": "^16.3.1",
+    "multer": "^1.4.5-lts.1",
+    "ipfs-http-client": "^60.0.1",
+    "axios": "^1.6.2",
+    "jsonwebtoken": "^9.0.2",
+    "bcryptjs": "^2.4.3",
+    "mongoose": "^8.0.3",
+    "express-rate-limit": "^7.1.5",
+    "express-validator": "^7.0.1",
+    "compression": "^1.7.4",
+    "morgan": "^1.10.0",
+    "sharp": "^0.33.0",
+    "archiver": "^6.0.1",
+    "unzipper": "^0.10.14"
+  },
+  "devDependencies": {
+    "nodemon": "^3.0.2",
+    "jest": "^29.7.0",
+    "supertest": "^6.3.3"
+  },
+  "keywords": [
+    "hedera",
+    "nft",
+    "comics",
+    "blockchain",
+    "hts"
+  ],
+  "author": "Comic Pad Team",
+  "license": "MIT"
+}

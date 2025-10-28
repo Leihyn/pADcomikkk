@@ -1,0 +1,118 @@
+version: '3.8'
+
+services:
+  # MongoDB Database
+  mongodb:
+    image: mongo:7.0
+    container_name: comic-pad-mongodb
+    restart: unless-stopped
+    environment:
+      MONGO_INITDB_ROOT_USERNAME: admin
+      MONGO_INITDB_ROOT_PASSWORD: password123
+      MONGO_INITDB_DATABASE: comicpad
+    ports:
+      - "27017:27017"
+    volumes:
+      - mongodb_data:/data/db
+      - ./scripts/mongo-init.js:/docker-entrypoint-initdb.d/mongo-init.js:ro
+    networks:
+      - comic-pad-network
+
+  # Redis Cache
+  redis:
+    image: redis:7.2-alpine
+    container_name: comic-pad-redis
+    restart: unless-stopped
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    networks:
+      - comic-pad-network
+
+  # Backend API
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: comic-pad-backend
+    restart: unless-stopped
+    environment:
+      NODE_ENV: production
+      PORT: 3001
+      MONGODB_URI: mongodb://admin:password123@mongodb:27017/comicpad?authSource=admin
+      REDIS_URL: redis://redis:6379
+      HEDERA_NETWORK: testnet
+      HEDERA_ACCOUNT_ID: ${HEDERA_ACCOUNT_ID}
+      HEDERA_PRIVATE_KEY: ${HEDERA_PRIVATE_KEY}
+      PINATA_API_KEY: ${PINATA_API_KEY}
+      PINATA_SECRET_KEY: ${PINATA_SECRET_KEY}
+      JWT_SECRET: ${JWT_SECRET}
+    ports:
+      - "3001:3001"
+    depends_on:
+      - mongodb
+      - redis
+    volumes:
+      - ./backend/uploads:/app/uploads
+    networks:
+      - comic-pad-network
+
+  # Frontend
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    container_name: comic-pad-frontend
+    restart: unless-stopped
+    environment:
+      VITE_API_URL: http://localhost:3001
+      VITE_HEDERA_NETWORK: testnet
+    ports:
+      - "3000:80"
+    depends_on:
+      - backend
+    networks:
+      - comic-pad-network
+
+  # Nginx Reverse Proxy
+  nginx:
+    image: nginx:alpine
+    container_name: comic-pad-nginx
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./nginx/nginx.conf:/etc/nginx/nginx.conf:ro
+      - ./nginx/ssl:/etc/nginx/ssl:ro
+    depends_on:
+      - frontend
+      - backend
+    networks:
+      - comic-pad-network
+
+  # IPFS Node (Optional)
+  ipfs:
+    image: ipfs/go-ipfs:latest
+    container_name: comic-pad-ipfs
+    restart: unless-stopped
+    ports:
+      - "4001:4001"
+      - "5001:5001"
+      - "8080:8080"
+    volumes:
+      - ipfs_data:/data/ipfs
+    environment:
+      IPFS_PROFILE: server
+    networks:
+      - comic-pad-network
+
+volumes:
+  mongodb_data:
+  redis_data:
+  ipfs_data:
+
+networks:
+  comic-pad-network:
+    driver: bridge

@@ -1,0 +1,60 @@
+{
+  "name": "comic-pad-frontend",
+  "version": "1.0.0",
+  "description": "Comic Pad Frontend - Hedera-based NFT Comic Platform",
+  "private": true,
+  "dependencies": {
+    "@hashgraph/sdk": "^2.7.0",
+    "react": "^18.2.0",
+    "react-dom": "^18.2.0",
+    "react-router-dom": "^6.8.0",
+    "react-query": "^3.39.3",
+    "axios": "^1.6.2",
+    "styled-components": "^6.1.6",
+    "framer-motion": "^10.16.16",
+    "react-hot-toast": "^2.4.1",
+    "react-dropzone": "^14.2.3",
+    "react-image-gallery": "^1.3.0",
+    "react-intersection-observer": "^9.5.3",
+    "react-use": "^17.4.2",
+    "date-fns": "^2.30.0",
+    "lodash": "^4.17.21",
+    "react-markdown": "^9.0.1",
+    "react-icons": "^4.12.0",
+    "react-helmet-async": "^2.0.4",
+    "react-lazyload": "^3.2.0",
+    "react-virtualized": "^9.22.5",
+    "react-window": "^1.8.8",
+    "react-window-infinite-loader": "^1.0.9"
+  },
+  "devDependencies": {
+    "@types/react": "^18.2.45",
+    "@types/react-dom": "^18.2.18",
+    "@types/lodash": "^4.14.202",
+    "@types/react-window": "^1.8.8",
+    "@vitejs/plugin-react": "^4.2.1",
+    "vite": "^5.0.10",
+    "eslint": "^8.56.0",
+    "eslint-plugin-react": "^7.33.2",
+    "eslint-plugin-react-hooks": "^4.6.0",
+    "eslint-plugin-react-refresh": "^0.4.5",
+    "prettier": "^3.1.1",
+    "typescript": "^5.3.3"
+  },
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc && vite build",
+    "lint": "eslint . --ext ts,tsx --report-unused-disable-directives --max-warnings 0",
+    "preview": "vite preview",
+    "type-check": "tsc --noEmit"
+  },
+  "keywords": [
+    "hedera",
+    "nft",
+    "comics",
+    "react",
+    "typescript"
+  ],
+  "author": "Comic Pad Team",
+  "license": "MIT"
+}
