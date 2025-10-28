@@ -1,5 +1,5 @@
-const hederaService = require('./hederaService');
-const ipfsService = require('./ipfsService');
+import hederaService from "./hederaService.js";
+import ipfsService from "./ipfsService.js";
 
 class ComicService {
   constructor() {
@@ -497,4 +497,4 @@ class ComicService {
   }
 }
 
-module.exports = new ComicService();
+export default new ComicService();

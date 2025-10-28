@@ -1,220 +1,165 @@
-import React, { createContext, useContext, useState, useEffect, ReactNode } from 'react'
-import axios from 'axios'
-import toast from 'react-hot-toast'
+import React, { createContext, useContext, useState, useEffect, ReactNode } from 'react';
+import axios from 'axios';
 
-export interface User {
-  id: string
-  username: string
-  email: string
-  hederaAccountId?: string
-  createdAt: string
-  profile: {
-    bio: string
-    avatar: string
-    socialLinks: Record<string, string>
-  }
-  balance?: string
+const API_URL = import.meta.env.VITE_API_URL || 'http://localhost:3001/api';
+
+interface User {
+  accountId: string;
+  username: string;
+  bio: string;
+  avatar: string | null;
+  role: string;
+  balance?: string;
 }
 
 interface AuthContextType {
-  user: User | null
-  token: string | null
-  isAuthenticated: boolean
-  isLoading: boolean
-  login: (email: string, password: string) => Promise<void>
-  register: (username: string, email: string, password: string, hederaAccountId?: string) => Promise<void>
-  logout: () => void
-  updateProfile: (updates: Partial<User['profile']>) => Promise<void>
-  connectWallet: (hederaAccountId: string, publicKey?: string) => Promise<void>
+  user: User | null;
+  token: string | null;
+  isAuthenticated: boolean;
+  isLoading: boolean;
+  connectWallet: (accountId: string, publicKey?: string) => Promise<void>;
+  disconnectWallet: () => void;
+  updateProfile: (data: Partial<User>) => Promise<void>;
+  refreshProfile: () => Promise<void>;
 }
 
-const AuthContext = createContext<AuthContextType | undefined>(undefined)
+const AuthContext = createContext<AuthContextType | undefined>(undefined);
 
-interface AuthProviderProps {
-  children: ReactNode
-}
+export function AuthProvider({ children }: { children: ReactNode }) {
+  const [user, setUser] = useState<User | null>(null);
+  const [token, setToken] = useState<string | null>(null);
+  const [isLoading, setIsLoading] = useState(true);
 
-export const AuthProvider: React.FC<AuthProviderProps> = ({ children }) => {
-  const [user, setUser] = useState<User | null>(null)
-  const [token, setToken] = useState<string | null>(null)
-  const [isLoading, setIsLoading] = useState(true)
-
-  const isAuthenticated = !!user && !!token
-
-  // Initialize auth state from localStorage
+  // Load auth state from localStorage on mount
   useEffect(() => {
-    const initAuth = async () => {
-      try {
-        const savedToken = localStorage.getItem('token')
-        if (savedToken) {
-          setToken(savedToken)
-          
-          // Verify token and get user data
-          const response = await axios.post('/api/auth/verify-token', {
-            token: savedToken
-          })
-          
-          if (response.data.success) {
-            setUser(response.data.data.user)
-          } else {
-            // Token is invalid, clear it
-            localStorage.removeItem('token')
-            setToken(null)
-          }
+    const savedToken = localStorage.getItem('comic_pad_token');
+    const savedUser = localStorage.getItem('comic_pad_user');
+
+    if (savedToken && savedUser) {
+      setToken(savedToken);
+      setUser(JSON.parse(savedUser));
+      // Verify token is still valid
+      verifyToken(savedToken);
+    }
+    setIsLoading(false);
+  }, []);
+
+  // Verify token validity
+  const verifyToken = async (tokenToVerify: string) => {
+    try {
+      const response = await axios.post(
+        `${API_URL}/auth/verify`,
+        {},
+        {
+          headers: { Authorization: `Bearer ${tokenToVerify}` }
         }
-      } catch (error) {
-        console.error('Auth initialization error:', error)
-        localStorage.removeItem('token')
-        setToken(null)
-      } finally {
-        setIsLoading(false)
+      );
+      if (!response.data.success) {
+        disconnectWallet();
       }
+    } catch (error) {
+      console.error('Token verification failed:', error);
+      disconnectWallet();
     }
+  };
 
-    initAuth()
-  }, [])
-
-  // Set up axios interceptor for authenticated requests
-  useEffect(() => {
-    if (token) {
-      axios.defaults.headers.common['Authorization'] = `Bearer ${token}`
-    } else {
-      delete axios.defaults.headers.common['Authorization']
-    }
-  }, [token])
-
-  const login = async (email: string, password: string) => {
+  // Connect wallet
+  const connectWallet = async (accountId: string, publicKey?: string) => {
     try {
-      setIsLoading(true)
-      const response = await axios.post('/api/auth/login', {
-        email,
-        password
-      })
+      setIsLoading(true);
 
-      if (response.data.success) {
-        const { user: userData, token: authToken } = response.data.data
-        
-        setUser(userData)
-        setToken(authToken)
-        localStorage.setItem('token', authToken)
-        
-        toast.success('Login successful!')
-      } else {
-        throw new Error(response.data.error || 'Login failed')
-      }
-    } catch (error: any) {
-      const errorMessage = error.response?.data?.error || error.message || 'Login failed'
-      toast.error(errorMessage)
-      throw error
-    } finally {
-      setIsLoading(false)
-    }
-  }
-
-  const register = async (username: string, email: string, password: string, hederaAccountId?: string) => {
-    try {
-      setIsLoading(true)
-      const response = await axios.post('/api/auth/register', {
-        username,
-        email,
-        password,
-        hederaAccountId
-      })
-
-      if (response.data.success) {
-        const { user: userData, token: authToken } = response.data.data
-        
-        setUser(userData)
-        setToken(authToken)
-        localStorage.setItem('token', authToken)
-        
-        toast.success('Registration successful!')
-      } else {
-        throw new Error(response.data.error || 'Registration failed')
-      }
-    } catch (error: any) {
-      const errorMessage = error.response?.data?.error || error.message || 'Registration failed'
-      toast.error(errorMessage)
-      throw error
-    } finally {
-      setIsLoading(false)
-    }
-  }
-
-  const logout = () => {
-    setUser(null)
-    setToken(null)
-    localStorage.removeItem('token')
-    delete axios.defaults.headers.common['Authorization']
-    toast.success('Logged out successfully')
-  }
-
-  const updateProfile = async (updates: Partial<User['profile']>) => {
-    try {
-      const response = await axios.put('/api/auth/profile', updates)
-
-      if (response.data.success) {
-        setUser(response.data.data.user)
-        toast.success('Profile updated successfully!')
-      } else {
-        throw new Error(response.data.error || 'Profile update failed')
-      }
-    } catch (error: any) {
-      const errorMessage = error.response?.data?.error || error.message || 'Profile update failed'
-      toast.error(errorMessage)
-      throw error
-    }
-  }
-
-  const connectWallet = async (hederaAccountId: string, publicKey?: string) => {
-    try {
-      const response = await axios.post('/api/auth/connect-wallet', {
-        hederaAccountId,
+      const response = await axios.post(`${API_URL}/auth/connect`, {
+        accountId,
         publicKey
-      })
+      });
 
       if (response.data.success) {
-        // Update user with wallet info
-        setUser(prev => prev ? {
-          ...prev,
-          hederaAccountId,
-          balance: response.data.data.balance
-        } : null)
+        const { user: newUser, token: newToken } = response.data.data;
         
-        toast.success('Wallet connected successfully!')
-      } else {
-        throw new Error(response.data.error || 'Wallet connection failed')
+        setUser(newUser);
+        setToken(newToken);
+        
+        // Save to localStorage
+        localStorage.setItem('comic_pad_token', newToken);
+        localStorage.setItem('comic_pad_user', JSON.stringify(newUser));
       }
-    } catch (error: any) {
-      const errorMessage = error.response?.data?.error || error.message || 'Wallet connection failed'
-      toast.error(errorMessage)
-      throw error
+    } catch (error) {
+      console.error('Failed to connect wallet:', error);
+      throw error;
+    } finally {
+      setIsLoading(false);
     }
-  }
+  };
 
-  const value: AuthContextType = {
+  // Disconnect wallet
+  const disconnectWallet = () => {
+    setUser(null);
+    setToken(null);
+    localStorage.removeItem('comic_pad_token');
+    localStorage.removeItem('comic_pad_user');
+  };
+
+  // Update profile
+  const updateProfile = async (data: Partial<User>) => {
+    if (!token) throw new Error('Not authenticated');
+
+    try {
+      const response = await axios.put(
+        `${API_URL}/auth/profile`,
+        data,
+        {
+          headers: { Authorization: `Bearer ${token}` }
+        }
+      );
+
+      if (response.data.success) {
+        const updatedUser = response.data.data;
+        setUser(updatedUser);
+        localStorage.setItem('comic_pad_user', JSON.stringify(updatedUser));
+      }
+    } catch (error) {
+      console.error('Failed to update profile:', error);
+      throw error;
+    }
+  };
+
+  // Refresh profile data
+  const refreshProfile = async () => {
+    if (!token) return;
+
+    try {
+      const response = await axios.get(`${API_URL}/auth/profile`, {
+        headers: { Authorization: `Bearer ${token}` }
+      });
+
+      if (response.data.success) {
+        const updatedUser = response.data.data;
+        setUser(updatedUser);
+        localStorage.setItem('comic_pad_user', JSON.stringify(updatedUser));
+      }
+    } catch (error) {
+      console.error('Failed to refresh profile:', error);
+    }
+  };
+
+  const value = {
     user,
     token,
-    isAuthenticated,
+    isAuthenticated: !!user && !!token,
     isLoading,
-    login,
-    register,
-    logout,
+    connectWallet,
+    disconnectWallet,
     updateProfile,
-    connectWallet
-  }
+    refreshProfile
+  };
 
-  return (
-    <AuthContext.Provider value={value}>
-      {children}
-    </AuthContext.Provider>
-  )
+  return <AuthContext.Provider value={value}>{children}</AuthContext.Provider>;
 }
 
-export const useAuth = (): AuthContextType => {
-  const context = useContext(AuthContext)
+export function useAuth() {
+  const context = useContext(AuthContext);
   if (context === undefined) {
-    throw new Error('useAuth must be used within an AuthProvider')
+    throw new Error('useAuth must be used within an AuthProvider');
   }
-  return context
+  return context;
 }

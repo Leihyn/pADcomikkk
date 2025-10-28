@@ -1,7 +1,7 @@
-const express = require('express');
-const { body, validationResult } = require('express-validator');
-const hederaService = require('../services/hederaService');
-const comicService = require('../services/comicService');
+import express from 'express';
+import { body, validationResult } from 'express-validator';
+import hederaService from '../services/hederaService.js';
+import comicService from '../services/comicService.js';
 
 const router = express.Router();
 
@@ -420,4 +420,5 @@ router.get('/stats', async (req, res) => {
   }
 });
 
-module.exports = router;
+export default router;
+

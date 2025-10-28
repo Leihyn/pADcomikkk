@@ -1,407 +1,357 @@
-const express = require('express');
-const { body, validationResult } = require('express-validator');
-const hederaService = require('../services/hederaService');
-const ipfsService = require('../services/ipfsService');
+import express from "express";
+import comicService from "../services/comicService.js";
+import hederaService from "../services/hederaService.js";
+import { authenticateToken } from "./auth.js";
 
 const router = express.Router();
 
-// Validation middleware
-const validateRequest = (req, res, next) => {
-  const errors = validationResult(req);
-  if (!errors.isEmpty()) {
-    return res.status(400).json({
-      error: 'Validation failed',
-      details: errors.array()
-    });
-  }
-  next();
-};
+// In-memory storage for reading progress and bookmarks
+const readingProgress = new Map();
+const bookmarks = new Map();
 
 /**
- * @route POST /api/reader/access
- * @desc Check if user has access to read a comic
- * @access Public
+ * GET /api/reader/library/:accountId
+ * Get user's owned comics
  */
-router.post('/access', [
-  body('comicId').notEmpty().withMessage('Comic ID is required'),
-  body('userAddress').notEmpty().withMessage('User address is required'),
-  body('tokenId').notEmpty().withMessage('Token ID is required'),
-  body('serialNumber').isInt({ min: 1 }).withMessage('Serial number must be a positive integer')
-], validateRequest, async (req, res) => {
+router.get("/library/:accountId", async (req, res) => {
   try {
-    const { comicId, userAddress, tokenId, serialNumber } = req.body;
+    const { accountId } = req.params;
 
-    // Check NFT ownership
-    const ownership = await hederaService.checkNFTOwnership(userAddress, tokenId, serialNumber);
+    // Get account balance to see owned tokens
+    const balance = await hederaService.getBalance(accountId);
     
-    if (!ownership) {
-      return res.json({
+    // Extract token IDs from balance
+    const ownedTokens = [];
+    if (balance.tokens) {
+      for (const [tokenId, amount] of balance.tokens.entries()) {
+        if (amount.toNumber() > 0) {
+          ownedTokens.push({
+            tokenId: tokenId.toString(),
+            quantity: amount.toNumber()
+          });
+        }
+      }
+    }
+
+    res.status(200).json({
+      success: true,
+      data: {
+        accountId,
+        library: ownedTokens,
+        total: ownedTokens.length
+      }
+    });
+  } catch (error) {
+    console.error("Error fetching library:", error);
+    res.status(500).json({
+      success: false,
+      message: error.message || "Failed to fetch library"
+    });
+  }
+});
+
+/**
+ * GET /api/reader/access/:tokenId
+ * Check access to comic
+ */
+router.get("/access/:tokenId", authenticateToken, async (req, res) => {
+  try {
+    const { tokenId } = req.params;
+    const { serial } = req.query;
+    const accountId = req.user.accountId;
+
+    // Verify ownership and get access
+    const access = await comicService.verifyAccess({
+      accountId,
+      tokenId,
+      serial: serial ? parseInt(serial) : undefined
+    });
+
+    if (!access.hasAccess) {
+      return res.status(403).json({
+        success: false,
+        message: access.message || "Access denied"
+      });
+    }
+
+    res.status(200).json({
+      success: true,
+      data: access
+    });
+  } catch (error) {
+    console.error("Error checking access:", error);
+    res.status(500).json({
+      success: false,
+      message: error.message || "Failed to check access"
+    });
+  }
+});
+
+/**
+ * GET /api/reader/content/:tokenId
+ * Get comic content (token-gated)
+ */
+router.get("/content/:tokenId", authenticateToken, async (req, res) => {
+  try {
+    const { tokenId } = req.params;
+    const { serial } = req.query;
+    const accountId = req.user.accountId;
+
+    // Verify access
+    const access = await comicService.verifyAccess({
+      accountId,
+      tokenId,
+      serial: serial ? parseInt(serial) : undefined
+    });
+
+    if (!access.hasAccess) {
+      return res.status(403).json({
+        success: false,
+        message: "You do not own this comic"
+      });
+    }
+
+    res.status(200).json({
+      success: true,
+      data: access.comic
+    });
+  } catch (error) {
+    console.error("Error fetching content:", error);
+    res.status(500).json({
+      success: false,
+      message: error.message || "Failed to fetch content"
+    });
+  }
+});
+
+/**
+ * POST /api/reader/progress
+ * Save reading progress
+ */
+router.post("/progress", authenticateToken, async (req, res) => {
+  try {
+    const { tokenId, serial, currentPage, totalPages } = req.body;
+    const accountId = req.user.accountId;
+
+    if (!tokenId || currentPage === undefined) {
+      return res.status(400).json({
+        success: false,
+        message: "Token ID and current page are required"
+      });
+    }
+
+    const progressKey = `${accountId}-${tokenId}-${serial || 1}`;
+    const progress = {
+      accountId,
+      tokenId,
+      serial: serial || 1,
+      currentPage: parseInt(currentPage),
+      totalPages: parseInt(totalPages),
+      percentage: totalPages ? Math.round((currentPage / totalPages) * 100) : 0,
+      lastRead: new Date().toISOString()
+    };
+
+    readingProgress.set(progressKey, progress);
+
+    res.status(200).json({
+      success: true,
+      message: "Progress saved",
+      data: progress
+    });
+  } catch (error) {
+    console.error("Error saving progress:", error);
+    res.status(500).json({
+      success: false,
+      message: error.message || "Failed to save progress"
+    });
+  }
+});
+
+/**
+ * GET /api/reader/progress/:tokenId
+ * Get reading progress
+ */
+router.get("/progress/:tokenId", authenticateToken, async (req, res) => {
+  try {
+    const { tokenId } = req.params;
+    const { serial } = req.query;
+    const accountId = req.user.accountId;
+
+    const progressKey = `${accountId}-${tokenId}-${serial || 1}`;
+    const progress = readingProgress.get(progressKey);
+
+    if (!progress) {
+      return res.status(200).json({
         success: true,
         data: {
-          hasAccess: false,
-          reason: 'NFT not owned by user'
+          currentPage: 1,
+          percentage: 0
         }
       });
     }
 
-    // Get NFT info to verify it's the correct comic
-    const nftInfo = await hederaService.getNFTInfo(tokenId, serialNumber);
-    
-    res.json({
+    res.status(200).json({
       success: true,
-      data: {
-        hasAccess: true,
-        nftInfo,
-        accessGrantedAt: new Date().toISOString()
-      }
+      data: progress
     });
   } catch (error) {
-    console.error('Error checking access:', error);
+    console.error("Error fetching progress:", error);
     res.status(500).json({
       success: false,
-      error: error.message
+      message: error.message || "Failed to fetch progress"
     });
   }
 });
 
 /**
- * @route GET /api/reader/comic/:comicId
- * @desc Get comic content for reading
- * @access Public
+ * POST /api/reader/bookmark
+ * Add bookmark
  */
-router.get('/comic/:comicId', async (req, res) => {
+router.post("/bookmark", authenticateToken, async (req, res) => {
   try {
-    const { comicId } = req.params;
-    const { userAddress, tokenId, serialNumber } = req.query;
+    const { tokenId, serial, pageNumber, note } = req.body;
+    const accountId = req.user.accountId;
 
-    // Verify ownership if provided
-    if (userAddress && tokenId && serialNumber) {
-      const ownership = await hederaService.checkNFTOwnership(userAddress, tokenId, serialNumber);
-      if (!ownership) {
-        return res.status(403).json({
-          success: false,
-          error: 'Access denied: NFT not owned by user'
-        });
-      }
-    }
-
-    // In a real implementation, you would fetch comic data from database
-    // For now, return mock data structure
-    const comicData = {
-      id: comicId,
-      title: 'Sample Comic',
-      series: 'Sample Series',
-      issueNumber: 1,
-      pages: [
-        {
-          pageNumber: 1,
-          thumbnail: 'https://ipfs.io/ipfs/QmSample1',
-          web: 'https://ipfs.io/ipfs/QmSample1',
-          print: 'https://ipfs.io/ipfs/QmSample1'
-        },
-        {
-          pageNumber: 2,
-          thumbnail: 'https://ipfs.io/ipfs/QmSample2',
-          web: 'https://ipfs.io/ipfs/QmSample2',
-          print: 'https://ipfs.io/ipfs/QmSample2'
-        }
-      ],
-      metadata: {
-        totalPages: 2,
-        format: 'CBZ',
-        resolution: '2048x3072',
-        downloadUrl: 'https://ipfs.io/ipfs/QmSampleCBZ'
-      }
-    };
-
-    res.json({
-      success: true,
-      data: comicData
-    });
-  } catch (error) {
-    console.error('Error getting comic content:', error);
-    res.status(500).json({
-      success: false,
-      error: error.message
-    });
-  }
-});
-
-/**
- * @route GET /api/reader/page/:comicId/:pageNumber
- * @desc Get specific page content
- * @access Public
- */
-router.get('/page/:comicId/:pageNumber', async (req, res) => {
-  try {
-    const { comicId, pageNumber } = req.params;
-    const { userAddress, tokenId, serialNumber, quality = 'web' } = req.query;
-
-    // Verify ownership if provided
-    if (userAddress && tokenId && serialNumber) {
-      const ownership = await hederaService.checkNFTOwnership(userAddress, tokenId, serialNumber);
-      if (!ownership) {
-        return res.status(403).json({
-          success: false,
-          error: 'Access denied: NFT not owned by user'
-        });
-      }
-    }
-
-    // Validate quality parameter
-    const validQualities = ['thumbnail', 'web', 'print'];
-    if (!validQualities.includes(quality)) {
+    if (!tokenId || pageNumber === undefined) {
       return res.status(400).json({
         success: false,
-        error: 'Invalid quality parameter. Must be thumbnail, web, or print'
+        message: "Token ID and page number are required"
       });
     }
 
-    // In a real implementation, you would fetch page data from database/IPFS
-    const pageData = {
-      comicId,
-      pageNumber: parseInt(pageNumber),
-      quality,
-      url: `https://ipfs.io/ipfs/QmSample${pageNumber}`,
-      metadata: {
-        width: quality === 'thumbnail' ? 400 : quality === 'web' ? 1200 : 2048,
-        height: quality === 'thumbnail' ? 600 : quality === 'web' ? 1800 : 3072,
-        format: 'JPEG',
-        size: '2.5MB'
-      }
-    };
-
-    res.json({
-      success: true,
-      data: pageData
-    });
-  } catch (error) {
-    console.error('Error getting page content:', error);
-    res.status(500).json({
-      success: false,
-      error: error.message
-    });
-  }
-});
-
-/**
- * @route GET /api/reader/download/:comicId
- * @desc Download comic in CBZ format
- * @access Public
- */
-router.get('/download/:comicId', async (req, res) => {
-  try {
-    const { comicId } = req.params;
-    const { userAddress, tokenId, serialNumber, format = 'cbz' } = req.query;
-
-    // Verify ownership
-    if (userAddress && tokenId && serialNumber) {
-      const ownership = await hederaService.checkNFTOwnership(userAddress, tokenId, serialNumber);
-      if (!ownership) {
-        return res.status(403).json({
-          success: false,
-          error: 'Access denied: NFT not owned by user'
-        });
-      }
-    }
-
-    // Validate format
-    const validFormats = ['cbz', 'pdf', 'zip'];
-    if (!validFormats.includes(format)) {
-      return res.status(400).json({
-        success: false,
-        error: 'Invalid format. Must be cbz, pdf, or zip'
-      });
-    }
-
-    // In a real implementation, you would:
-    // 1. Fetch comic data from database
-    // 2. Generate the requested format
-    // 3. Stream the file to the user
-
-    const downloadData = {
-      comicId,
-      format,
-      url: `https://ipfs.io/ipfs/QmSample${format.toUpperCase()}`,
-      filename: `comic-${comicId}.${format}`,
-      size: '15.2MB',
-      expiresAt: new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString() // 24 hours
-    };
-
-    res.json({
-      success: true,
-      data: downloadData
-    });
-  } catch (error) {
-    console.error('Error downloading comic:', error);
-    res.status(500).json({
-      success: false,
-      error: error.message
-    });
-  }
-});
-
-/**
- * @route POST /api/reader/progress
- * @desc Save reading progress
- * @access Public
- */
-router.post('/progress', [
-  body('comicId').notEmpty().withMessage('Comic ID is required'),
-  body('userAddress').notEmpty().withMessage('User address is required'),
-  body('currentPage').isInt({ min: 1 }).withMessage('Current page must be a positive integer'),
-  body('totalPages').isInt({ min: 1 }).withMessage('Total pages must be a positive integer'),
-  body('readTime').optional().isInt({ min: 0 }).withMessage('Read time must be a non-negative integer')
-], validateRequest, async (req, res) => {
-  try {
-    const { comicId, userAddress, currentPage, totalPages, readTime = 0 } = req.body;
-
-    // In a real implementation, you would save progress to database
-    const progress = {
-      comicId,
-      userAddress,
-      currentPage,
-      totalPages,
-      readTime,
-      progressPercentage: Math.round((currentPage / totalPages) * 100),
-      lastReadAt: new Date().toISOString(),
-      isCompleted: currentPage >= totalPages
-    };
-
-    res.json({
-      success: true,
-      data: progress,
-      message: 'Reading progress saved'
-    });
-  } catch (error) {
-    console.error('Error saving progress:', error);
-    res.status(500).json({
-      success: false,
-      error: error.message
-    });
-  }
-});
-
-/**
- * @route GET /api/reader/progress/:userAddress
- * @desc Get user's reading progress
- * @access Public
- */
-router.get('/progress/:userAddress', async (req, res) => {
-  try {
-    const { userAddress } = req.params;
-    const { limit = 20, offset = 0 } = req.query;
-
-    // In a real implementation, you would fetch from database
-    const progressData = [];
-
-    res.json({
-      success: true,
-      data: {
-        progress: progressData,
-        total: progressData.length,
-        limit: parseInt(limit),
-        offset: parseInt(offset)
-      }
-    });
-  } catch (error) {
-    console.error('Error getting progress:', error);
-    res.status(500).json({
-      success: false,
-      error: error.message
-    });
-  }
-});
-
-/**
- * @route POST /api/reader/bookmark
- * @desc Add bookmark to comic
- * @access Public
- */
-router.post('/bookmark', [
-  body('comicId').notEmpty().withMessage('Comic ID is required'),
-  body('userAddress').notEmpty().withMessage('User address is required'),
-  body('pageNumber').isInt({ min: 1 }).withMessage('Page number must be a positive integer'),
-  body('note').optional().isString().withMessage('Note must be a string')
-], validateRequest, async (req, res) => {
-  try {
-    const { comicId, userAddress, pageNumber, note = '' } = req.body;
+    const bookmarkKey = `${accountId}-${tokenId}`;
+    let userBookmarks = bookmarks.get(bookmarkKey) || [];
 
     const bookmark = {
-      id: `${comicId}-${userAddress}-${pageNumber}`,
-      comicId,
-      userAddress,
-      pageNumber,
-      note,
+      id: `${Date.now()}-${Math.random().toString(36).substr(2, 9)}`,
+      tokenId,
+      serial: serial || 1,
+      pageNumber: parseInt(pageNumber),
+      note: note || "",
       createdAt: new Date().toISOString()
     };
 
+    userBookmarks.push(bookmark);
+    bookmarks.set(bookmarkKey, userBookmarks);
+
     res.status(201).json({
       success: true,
-      data: bookmark,
-      message: 'Bookmark added successfully'
+      message: "Bookmark added",
+      data: bookmark
     });
   } catch (error) {
-    console.error('Error adding bookmark:', error);
+    console.error("Error adding bookmark:", error);
     res.status(500).json({
       success: false,
-      error: error.message
+      message: error.message || "Failed to add bookmark"
     });
   }
 });
 
 /**
- * @route GET /api/reader/bookmarks/:userAddress
- * @desc Get user's bookmarks
- * @access Public
+ * GET /api/reader/bookmarks/:tokenId
+ * Get bookmarks for comic
  */
-router.get('/bookmarks/:userAddress', async (req, res) => {
+router.get("/bookmarks/:tokenId", authenticateToken, async (req, res) => {
   try {
-    const { userAddress } = req.params;
-    const { limit = 20, offset = 0 } = req.query;
+    const { tokenId } = req.params;
+    const accountId = req.user.accountId;
 
-    // In a real implementation, you would fetch from database
-    const bookmarks = [];
+    const bookmarkKey = `${accountId}-${tokenId}`;
+    const userBookmarks = bookmarks.get(bookmarkKey) || [];
 
-    res.json({
+    res.status(200).json({
       success: true,
       data: {
-        bookmarks,
-        total: bookmarks.length,
-        limit: parseInt(limit),
-        offset: parseInt(offset)
+        bookmarks: userBookmarks,
+        total: userBookmarks.length
       }
     });
   } catch (error) {
-    console.error('Error getting bookmarks:', error);
+    console.error("Error fetching bookmarks:", error);
     res.status(500).json({
       success: false,
-      error: error.message
+      message: error.message || "Failed to fetch bookmarks"
     });
   }
 });
 
 /**
- * @route DELETE /api/reader/bookmark/:bookmarkId
- * @desc Remove bookmark
- * @access Public
+ * DELETE /api/reader/bookmark/:bookmarkId
+ * Delete bookmark
  */
-router.delete('/bookmark/:bookmarkId', async (req, res) => {
+router.delete("/bookmark/:bookmarkId", authenticateToken, async (req, res) => {
   try {
     const { bookmarkId } = req.params;
+    const accountId = req.user.accountId;
 
-    // In a real implementation, you would delete from database
-    res.json({
+    // Find and delete bookmark
+    let deleted = false;
+    for (const [key, userBookmarks] of bookmarks.entries()) {
+      if (key.startsWith(accountId)) {
+        const index = userBookmarks.findIndex(b => b.id === bookmarkId);
+        if (index !== -1) {
+          userBookmarks.splice(index, 1);
+          bookmarks.set(key, userBookmarks);
+          deleted = true;
+          break;
+        }
+      }
+    }
+
+    if (!deleted) {
+      return res.status(404).json({
+        success: false,
+        message: "Bookmark not found"
+      });
+    }
+
+    res.status(200).json({
       success: true,
-      message: 'Bookmark removed successfully'
+      message: "Bookmark deleted"
     });
   } catch (error) {
-    console.error('Error removing bookmark:', error);
+    console.error("Error deleting bookmark:", error);
     res.status(500).json({
       success: false,
-      error: error.message
+      message: error.message || "Failed to delete bookmark"
     });
   }
 });
 
-module.exports = router;
+/**
+ * GET /api/reader/reading-list
+ * Get user's reading list with progress
+ */
+router.get("/reading-list", authenticateToken, async (req, res) => {
+  try {
+    const accountId = req.user.accountId;
+
+    // Get all progress for user
+    const userProgress = [];
+    for (const [key, progress] of readingProgress.entries()) {
+      if (key.startsWith(accountId)) {
+        userProgress.push(progress);
+      }
+    }
+
+    // Sort by last read
+    userProgress.sort((a, b) => new Date(b.lastRead) - new Date(a.lastRead));
+
+    res.status(200).json({
+      success: true,
+      data: {
+        readingList: userProgress,
+        total: userProgress.length
+      }
+    });
+  } catch (error) {
+    console.error("Error fetching reading list:", error);
+    res.status(500).json({
+      success: false,
+      message: error.message || "Failed to fetch reading list"
+    });
+  }
+});
+
+export default router;

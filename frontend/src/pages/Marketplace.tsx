@@ -37,6 +37,7 @@ interface MarketplaceProps {
 const MarketplaceContainer = styled.div`
   min-height: 100vh;
   background: ${({ theme }) => theme.colors.background};
+
   padding: 2rem 0;
 `
 

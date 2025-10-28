@@ -1,367 +1,284 @@
-const {
+import {
   Client,
   PrivateKey,
   AccountId,
   TokenCreateTransaction,
   TokenType,
   TokenSupplyType,
-  CustomRoyaltyFee,
   TokenMintTransaction,
+  TokenAssociateTransaction,
   TransferTransaction,
+  TokenInfoQuery,
   AccountBalanceQuery,
-  TokenNftInfoQuery,
-  NftId,
-  Hbar,
-  Status
-} = require('@hashgraph/sdk');
+  CustomRoyaltyFee,
+  CustomFixedFee,
+  Hbar
+} from "@hashgraph/sdk";
 
 class HederaService {
   constructor() {
     this.client = null;
-    this.accountId = null;
-    this.privateKey = null;
-    this.publicKey = null;
-    this.isInitialized = false;
+    this.operatorId = null;
+    this.operatorKey = null;
+    this.treasuryId = null;
   }
 
+  /**
+   * Initialize Hedera client
+   */
   async initialize() {
     try {
-      // Initialize Hedera client
-      this.client = Client.forName(process.env.HEDERA_NETWORK || 'testnet');
-      
-      // Check if credentials are provided
-      if (!process.env.HEDERA_ACCOUNT_ID || !process.env.HEDERA_PRIVATE_KEY) {
-        console.log('⚠️  Hedera credentials not provided, running in demo mode');
-        this.isInitialized = true;
-        return true;
+      const network = process.env.HEDERA_NETWORK || "testnet";
+      const accountId = process.env.HEDERA_ACCOUNT_ID;
+      const privateKey = process.env.HEDERA_PRIVATE_KEY;
+
+      if (!accountId || !privateKey) {
+        throw new Error("Hedera credentials not configured");
       }
-      
-      // Set up account credentials
-      this.accountId = AccountId.fromString(process.env.HEDERA_ACCOUNT_ID);
-      this.privateKey = PrivateKey.fromString(process.env.HEDERA_PRIVATE_KEY);
-      this.publicKey = this.privateKey.publicKey;
-      
-      // Set client credentials
-      this.client.setOperator(this.accountId, this.privateKey);
-      
-      // Test connection
-      const balance = await new AccountBalanceQuery()
-        .setAccountId(this.accountId)
-        .execute(this.client);
-      
-      console.log(`✅ Hedera connection established. Account balance: ${balance.hbars.toString()}`);
-      
-      this.isInitialized = true;
+
+      this.operatorId = AccountId.fromString(accountId);
+      this.operatorKey = PrivateKey.fromString(privateKey);
+      this.treasuryId = this.operatorId;
+
+      // Create client based on network
+      if (network === "mainnet") {
+        this.client = Client.forMainnet();
+      } else {
+        this.client = Client.forTestnet();
+      }
+
+      this.client.setOperator(this.operatorId, this.operatorKey);
+
+      console.log(`✅ Hedera Service initialized on ${network}`);
+      console.log(`📍 Operator Account: ${this.operatorId.toString()}`);
+
       return true;
     } catch (error) {
-      console.error('❌ Failed to initialize Hedera service:', error);
-      console.log('⚠️  Running in demo mode without Hedera connection');
-      this.isInitialized = true;
-      return true;
+      console.error("❌ Failed to initialize Hedera Service:", error);
+      throw error;
     }
   }
 
   /**
-   * Create a new NFT collection using Hedera Token Service (HTS)
-   * @param {Object} collectionData - Collection metadata
-   * @returns {Object} Token creation result
+   * Create NFT Collection (Token)
    */
-  async createNFTCollection(collectionData) {
-    if (!this.isInitialized) {
-      throw new Error('Hedera service not initialized');
-    }
-
+  async createCollection({
+    name,
+    symbol,
+    maxSupply,
+    royaltyPercentage = 10,
+    metadata = {}
+  }) {
     try {
-      const {
-        name,
-        symbol,
-        metadata,
-        royaltyPercentage = 10, // Default 10% royalty
-        maxSupply = 0 // 0 = unlimited
-      } = collectionData;
+      if (!this.client) await this.initialize();
 
-      // Create royalty fee configuration
+      // Define custom royalty fee (10% to creator)
       const royaltyFee = new CustomRoyaltyFee()
-        .setFeeCollectorAccountId(this.accountId)
         .setNumerator(royaltyPercentage)
-        .setDenominator(100);
+        .setDenominator(100)
+        .setFeeCollectorAccountId(this.treasuryId)
+        .setFallbackFee(new CustomFixedFee().setHbarAmount(new Hbar(1)));
 
-      // Create the NFT token
-      const tokenCreateTx = await new TokenCreateTransaction()
+      // Create NFT token
+      const transaction = await new TokenCreateTransaction()
         .setTokenName(name)
         .setTokenSymbol(symbol)
         .setTokenType(TokenType.NonFungibleUnique)
         .setDecimals(0)
         .setInitialSupply(0)
-        .setTreasuryAccountId(this.accountId)
-        .setSupplyKey(this.privateKey)
-        .setAdminKey(this.privateKey)
+        .setMaxSupply(maxSupply)
+        .setSupplyType(TokenSupplyType.Finite)
+        .setTreasuryAccountId(this.treasuryId)
+        .setSupplyKey(this.operatorKey)
+        .setAdminKey(this.operatorKey)
         .setCustomFees([royaltyFee])
         .setTokenMemo(JSON.stringify(metadata))
-        .execute(this.client);
+        .freezeWith(this.client);
 
-      const tokenCreateReceipt = await tokenCreateTx.getReceipt(this.client);
-      const tokenId = tokenCreateReceipt.tokenId;
+      const signTx = await transaction.sign(this.operatorKey);
+      const txResponse = await signTx.execute(this.client);
+      const receipt = await txResponse.getReceipt(this.client);
+      const tokenId = receipt.tokenId;
 
-      console.log(`✅ NFT Collection created: ${tokenId.toString()}`);
+      console.log(`✅ Collection created: ${tokenId.toString()}`);
 
       return {
         tokenId: tokenId.toString(),
         name,
         symbol,
-        royaltyPercentage,
         maxSupply,
-        metadata,
-        createdAt: new Date().toISOString()
+        royaltyPercentage,
+        transactionId: txResponse.transactionId.toString()
       };
     } catch (error) {
-      console.error('❌ Failed to create NFT collection:', error);
+      console.error("❌ Failed to create collection:", error);
       throw error;
     }
   }
 
   /**
-   * Mint a new NFT with metadata
-   * @param {string} tokenId - The token ID of the collection
-   * @param {string} metadataUri - IPFS URI containing NFT metadata
-   * @returns {Object} Minting result
+   * Mint NFT(s) to collection
    */
-  async mintNFT(tokenId, metadataUri) {
-    if (!this.isInitialized) {
-      throw new Error('Hedera service not initialized');
-    }
-
+  async mintNFT({ tokenId, metadataURIs }) {
     try {
-      // Convert metadata URI to bytes
-      const metadataBytes = Buffer.from(metadataUri, 'utf8');
+      if (!this.client) await this.initialize();
 
-      // Mint the NFT
-      const mintTx = await new TokenMintTransaction()
-        .setTokenId(tokenId)
-        .setMetadata([metadataBytes])
-        .execute(this.client);
-
-      const mintReceipt = await mintTx.getReceipt(this.client);
-      const serialNumber = mintReceipt.serials[0];
-
-      console.log(`✅ NFT minted: Token ${tokenId}, Serial ${serialNumber}`);
-
-      return {
-        tokenId: tokenId.toString(),
-        serialNumber: serialNumber.toNumber(),
-        metadataUri,
-        mintedAt: new Date().toISOString()
-      };
-    } catch (error) {
-      console.error('❌ Failed to mint NFT:', error);
-      throw error;
-    }
-  }
-
-  /**
-   * Batch mint multiple NFTs
-   * @param {string} tokenId - The token ID of the collection
-   * @param {string[]} metadataUris - Array of IPFS URIs
-   * @returns {Object} Batch minting result
-   */
-  async batchMintNFTs(tokenId, metadataUris) {
-    if (!this.isInitialized) {
-      throw new Error('Hedera service not initialized');
-    }
-
-    try {
       // Convert metadata URIs to bytes
-      const metadataBytes = metadataUris.map(uri => Buffer.from(uri, 'utf8'));
+      const metadataArray = metadataURIs.map(uri => Buffer.from(uri));
 
-      // Mint the NFTs
-      const mintTx = await new TokenMintTransaction()
+      // Mint NFT(s)
+      const transaction = await new TokenMintTransaction()
         .setTokenId(tokenId)
-        .setMetadata(metadataBytes)
-        .execute(this.client);
+        .setMetadata(metadataArray)
+        .freezeWith(this.client);
 
-      const mintReceipt = await mintTx.getReceipt(this.client);
-      const serialNumbers = mintReceipt.serials.map(sn => sn.toNumber());
+      const signTx = await transaction.sign(this.operatorKey);
+      const txResponse = await signTx.execute(this.client);
+      const receipt = await txResponse.getReceipt(this.client);
 
-      console.log(`✅ Batch minted ${serialNumbers.length} NFTs: Token ${tokenId}`);
+      const serials = receipt.serials.map(s => s.toString());
+
+      console.log(`✅ Minted ${serials.length} NFT(s) to ${tokenId}`);
+      console.log(`📝 Serial Numbers: ${serials.join(", ")}`);
 
       return {
-        tokenId: tokenId.toString(),
-        serialNumbers,
-        metadataUris,
-        mintedAt: new Date().toISOString()
+        tokenId,
+        serials,
+        transactionId: txResponse.transactionId.toString()
       };
     } catch (error) {
-      console.error('❌ Failed to batch mint NFTs:', error);
+      console.error("❌ Failed to mint NFT:", error);
       throw error;
     }
   }
 
   /**
-   * Transfer NFT to another account
-   * @param {string} tokenId - The token ID
-   * @param {number} serialNumber - The serial number
-   * @param {string} fromAccountId - Sender account ID
-   * @param {string} toAccountId - Receiver account ID
-   * @returns {Object} Transfer result
+   * Associate token with account
    */
-  async transferNFT(tokenId, serialNumber, fromAccountId, toAccountId) {
-    if (!this.isInitialized) {
-      throw new Error('Hedera service not initialized');
-    }
-
+  async associateToken({ accountId, tokenId, accountPrivateKey }) {
     try {
-      const transferTx = await new TransferTransaction()
-        .addNftTransfer(
-          tokenId,
-          serialNumber,
-          AccountId.fromString(fromAccountId),
-          AccountId.fromString(toAccountId)
-        )
-        .execute(this.client);
+      if (!this.client) await this.initialize();
 
-      const transferReceipt = await transferTx.getReceipt(this.client);
+      const transaction = await new TokenAssociateTransaction()
+        .setAccountId(accountId)
+        .setTokenIds([tokenId])
+        .freezeWith(this.client);
 
-      console.log(`✅ NFT transferred: Token ${tokenId}, Serial ${serialNumber}`);
+      const privateKey = PrivateKey.fromString(accountPrivateKey);
+      const signTx = await transaction.sign(privateKey);
+      const txResponse = await signTx.execute(this.client);
+      const receipt = await txResponse.getReceipt(this.client);
+
+      console.log(`✅ Token ${tokenId} associated with ${accountId}`);
 
       return {
-        tokenId: tokenId.toString(),
-        serialNumber,
-        fromAccountId,
-        toAccountId,
-        transferredAt: new Date().toISOString(),
-        transactionId: transferReceipt.transactionId.toString()
+        status: receipt.status.toString(),
+        transactionId: txResponse.transactionId.toString()
       };
     } catch (error) {
-      console.error('❌ Failed to transfer NFT:', error);
+      console.error("❌ Failed to associate token:", error);
       throw error;
     }
   }
 
   /**
-   * Get NFT information
-   * @param {string} tokenId - The token ID
-   * @param {number} serialNumber - The serial number
-   * @returns {Object} NFT information
+   * Transfer NFT
    */
-  async getNFTInfo(tokenId, serialNumber) {
-    if (!this.isInitialized) {
-      throw new Error('Hedera service not initialized');
-    }
-
+  async transferNFT({ tokenId, serial, fromAccountId, toAccountId, fromPrivateKey }) {
     try {
-      const nftInfo = await new TokenNftInfoQuery()
-        .setNftId(new NftId(tokenId, serialNumber))
-        .execute(this.client);
+      if (!this.client) await this.initialize();
+
+      const transaction = await new TransferTransaction()
+        .addNftTransfer(tokenId, serial, fromAccountId, toAccountId)
+        .freezeWith(this.client);
+
+      const privateKey = PrivateKey.fromString(fromPrivateKey);
+      const signTx = await transaction.sign(privateKey);
+      const txResponse = await signTx.execute(this.client);
+      const receipt = await txResponse.getReceipt(this.client);
+
+      console.log(`✅ NFT transferred: ${tokenId}:${serial}`);
+      console.log(`📤 From: ${fromAccountId} → To: ${toAccountId}`);
 
       return {
-        tokenId: tokenId.toString(),
-        serialNumber,
-        metadata: nftInfo.metadata.toString(),
-        accountId: nftInfo.accountId.toString(),
-        createdAt: new Date(nftInfo.creationTime.toDate()).toISOString()
+        status: receipt.status.toString(),
+        transactionId: txResponse.transactionId.toString()
       };
     } catch (error) {
-      console.error('❌ Failed to get NFT info:', error);
+      console.error("❌ Failed to transfer NFT:", error);
       throw error;
     }
   }
 
   /**
-   * Check if an account owns a specific NFT
-   * @param {string} accountId - Account to check
-   * @param {string} tokenId - Token ID to check
-   * @param {number} serialNumber - Serial number to check
-   * @returns {boolean} Ownership status
+   * Get token info
    */
-  async checkNFTOwnership(accountId, tokenId, serialNumber) {
-    if (!this.isInitialized) {
-      throw new Error('Hedera service not initialized');
-    }
-
+  async getTokenInfo(tokenId) {
     try {
-      const balance = await new AccountBalanceQuery()
-        .setAccountId(AccountId.fromString(accountId))
-        .execute(this.client);
+      if (!this.client) await this.initialize();
+
+      const query = new TokenInfoQuery().setTokenId(tokenId);
+      const tokenInfo = await query.execute(this.client);
+
+      return {
+        tokenId: tokenInfo.tokenId.toString(),
+        name: tokenInfo.name,
+        symbol: tokenInfo.symbol,
+        totalSupply: tokenInfo.totalSupply.toString(),
+        maxSupply: tokenInfo.maxSupply.toString(),
+        treasury: tokenInfo.treasuryAccountId.toString(),
+        customFees: tokenInfo.customFees
+      };
+    } catch (error) {
+      console.error("❌ Failed to get token info:", error);
+      throw error;
+    }
+  }
+
+  /**
+   * Check NFT ownership
+   */
+  async checkOwnership({ accountId, tokenId }) {
+    try {
+      if (!this.client) await this.initialize();
+
+      const query = new AccountBalanceQuery().setAccountId(accountId);
+      const balance = await query.execute(this.client);
 
       const tokenBalance = balance.tokens.get(tokenId);
-      return tokenBalance && tokenBalance.toNumber() > 0;
+      const owns = tokenBalance && tokenBalance.toNumber() > 0;
+
+      return {
+        accountId,
+        tokenId,
+        owns,
+        quantity: owns ? tokenBalance.toNumber() : 0
+      };
     } catch (error) {
-      console.error('❌ Failed to check NFT ownership:', error);
-      return false;
+      console.error("❌ Failed to check ownership:", error);
+      throw error;
     }
   }
 
   /**
    * Get account balance
-   * @param {string} accountId - Account ID to check
-   * @returns {Object} Account balance information
    */
-  async getAccountBalance(accountId) {
-    if (!this.isInitialized) {
-      throw new Error('Hedera service not initialized');
-    }
-
+  async getBalance(accountId) {
     try {
-      const balance = await new AccountBalanceQuery()
-        .setAccountId(AccountId.fromString(accountId))
-        .execute(this.client);
+      if (!this.client) await this.initialize();
+
+      const query = new AccountBalanceQuery().setAccountId(accountId);
+      const balance = await query.execute(this.client);
 
       return {
-        accountId,
-        hbarBalance: balance.hbars.toString(),
-        tokenBalances: Array.from(balance.tokens.entries()).map(([tokenId, amount]) => ({
-          tokenId: tokenId.toString(),
-          amount: amount.toNumber()
-        })),
-        timestamp: new Date().toISOString()
+        hbar: balance.hbars.toString(),
+        tokens: balance.tokens
       };
     } catch (error) {
-      console.error('❌ Failed to get account balance:', error);
+      console.error("❌ Failed to get balance:", error);
       throw error;
     }
-  }
-
-  /**
-   * Create a new Hedera account
-   * @param {string} publicKey - Public key for the new account
-   * @param {number} initialBalance - Initial HBAR balance (in tinybars)
-   * @returns {Object} New account information
-   */
-  async createAccount(publicKey, initialBalance = 1000000000) { // 1 HBAR default
-    if (!this.isInitialized) {
-      throw new Error('Hedera service not initialized');
-    }
-
-    try {
-      const newAccountId = AccountId.fromString(publicKey);
-      
-      // Note: In a real implementation, you would use AccountCreateTransaction
-      // This is a simplified version for demonstration
-      
-      return {
-        accountId: newAccountId.toString(),
-        publicKey,
-        initialBalance,
-        createdAt: new Date().toISOString()
-      };
-    } catch (error) {
-      console.error('❌ Failed to create account:', error);
-      throw error;
-    }
-  }
-
-  /**
-   * Get service status
-   * @returns {Object} Service status information
-   */
-  getStatus() {
-    return {
-      isInitialized: this.isInitialized,
-      network: process.env.HEDERA_NETWORK || 'testnet',
-      accountId: this.accountId ? this.accountId.toString() : null,
-      timestamp: new Date().toISOString()
-    };
   }
 }
 
-module.exports = new HederaService();
+export default new HederaService();
