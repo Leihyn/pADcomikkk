@@ -1,200 +1,155 @@
+
 import express from "express";
-import jwt from "jsonwebtoken";
-import bcrypt from "bcryptjs";
-import { body, validationResult } from "express-validator";
-import hederaService from "../services/hederaService.js"; // ✅ ensure .js extension
+import hederaService from "../services/hederaService.js";
+import comicService from "../services/comicService.js";
 
-const router = express.Router();
+const authRouter = express.Router();
 
-// Validation middleware
-const validateRequest = (req, res, next) => {
-  const errors = validationResult(req);
-  if (!errors.isEmpty()) {
-    return res.status(400).json({
-      error: "Validation failed",
-      details: errors.array(),
-    });
-  }
-  next();
-};
-
-// Mock user database (replace with real database in production)
-const users = new Map();
+// 🧠 Temporary in-memory sessions (replace with JWT or database in production)
+const sessions = new Map();
 
 /**
- * @route POST /api/auth/register
- * @desc Register a new user
- * @access Public
+ * POST /api/auth/connect
+ * Connect wallet and create/retrieve user session
  */
-router.post(
-  "/register",
-  [
-    body("username")
-      .isLength({ min: 3, max: 20 })
-      .withMessage("Username must be 3-20 characters"),
-    body("email").isEmail().withMessage("Valid email is required"),
-    body("password")
-      .isLength({ min: 6 })
-      .withMessage("Password must be at least 6 characters"),
-    body("hederaAccountId")
-      .optional()
-      .isString()
-      .withMessage("Hedera account ID must be a string"),
-  ],
-  validateRequest,
-  async (req, res) => {
+authRouter.post("/connect", async (req, res) => {
+  try {
+    const { walletAddress, publicKey } = req.body;
+
+    if (!walletAddress) {
+      return res.status(400).json({
+        success: false,
+        error: "Wallet address is required",
+      });
+    }
+
+    // Verify wallet exists on Hedera
     try {
-      const { username, email, password, hederaAccountId } = req.body;
+      await hederaService.getAccountBalance(walletAddress);
+    } catch (error) {
+      return res.status(400).json({
+        success: false,
+        error: "Invalid Hedera account ID",
+      });
+    }
 
-      if (users.has(email)) {
-        return res.status(400).json({
-          success: false,
-          error: "User already exists",
-        });
-      }
+    // Create or retrieve user session
+    let user = sessions.get(walletAddress);
 
-      const saltRounds = 10;
-      const hashedPassword = await bcrypt.hash(password, saltRounds);
-
-      const user = {
-        id: Date.now().toString(),
-        username,
-        email,
-        password: hashedPassword,
-        hederaAccountId: hederaAccountId || null,
-        createdAt: new Date().toISOString(),
-        isVerified: false,
-        profile: {
-          bio: "",
-          avatar: "",
-          socialLinks: {},
-        },
+    if (!user) {
+      user = {
+        wallet: walletAddress,
+        publicKey,
+        connectedAt: new Date().toISOString(),
+        lastActive: new Date().toISOString(),
       };
-
-      users.set(email, user);
-
-      const token = jwt.sign(
-        { userId: user.id, email: user.email },
-        process.env.JWT_SECRET,
-        { expiresIn: "7d" }
-      );
-
-      res.status(201).json({
-        success: true,
-        data: {
-          user: {
-            id: user.id,
-            username: user.username,
-            email: user.email,
-            hederaAccountId: user.hederaAccountId,
-            createdAt: user.createdAt,
-            profile: user.profile,
-          },
-          token,
-        },
-        message: "User registered successfully",
-      });
-    } catch (error) {
-      console.error("Error registering user:", error);
-      res.status(500).json({
-        success: false,
-        error: error.message,
-      });
+      sessions.set(walletAddress, user);
+    } else {
+      user.lastActive = new Date().toISOString();
     }
-  }
-);
 
-/**
- * @route POST /api/auth/login
- * @desc Login user
- * @access Public
- */
-router.post(
-  "/login",
-  [
-    body("email").isEmail().withMessage("Valid email is required"),
-    body("password").notEmpty().withMessage("Password is required"),
-  ],
-  validateRequest,
-  async (req, res) => {
-    try {
-      const { email, password } = req.body;
-      const user = users.get(email);
-
-      if (!user) {
-        return res.status(401).json({
-          success: false,
-          error: "Invalid credentials",
-        });
-      }
-
-      const isPasswordValid = await bcrypt.compare(password, user.password);
-      if (!isPasswordValid) {
-        return res.status(401).json({
-          success: false,
-          error: "Invalid credentials",
-        });
-      }
-
-      const token = jwt.sign(
-        { userId: user.id, email: user.email },
-        process.env.JWT_SECRET,
-        { expiresIn: "7d" }
-      );
-
-      res.json({
-        success: true,
-        data: {
-          user: {
-            id: user.id,
-            username: user.username,
-            email: user.email,
-            hederaAccountId: user.hederaAccountId,
-            createdAt: user.createdAt,
-            profile: user.profile,
-          },
-          token,
-        },
-        message: "Login successful",
-      });
-    } catch (error) {
-      console.error("Error logging in user:", error);
-      res.status(500).json({
-        success: false,
-        error: error.message,
-      });
-    }
-  }
-);
-
-/**
- * JWT Authentication Middleware
- */
-export const authenticateToken = (req, res, next) => {
-  const authHeader = req.headers["authorization"];
-  const token = authHeader && authHeader.split(" ")[1];
-
-  if (!token) {
-    return res.status(401).json({
+    res.json({
+      success: true,
+      user,
+      message: "Wallet connected successfully",
+    });
+  } catch (error) {
+    console.error("Connect wallet error:", error);
+    res.status(500).json({
       success: false,
-      error: "Access token required",
+      error: error.message,
     });
   }
+});
 
-  jwt.verify(token, process.env.JWT_SECRET, (err, user) => {
-    if (err) {
-      return res.status(403).json({
+/**
+ * GET /api/auth/profile/:wallet
+ * Get user profile and owned comics
+ */
+authRouter.get("/profile/:wallet", async (req, res) => {
+  try {
+    const { wallet } = req.params;
+
+    const user = sessions.get(wallet);
+    if (!user) {
+      return res.status(404).json({
         success: false,
-        error: "Invalid or expired token",
+        error: "User session not found",
       });
     }
-    req.user = user;
-    next();
-  });
-};
 
-// Apply authentication to protected routes
-router.use("/profile", authenticateToken);
-router.use("/connect-wallet", authenticateToken);
+    const balance = await hederaService.getAccountBalance(wallet);
+    const comics = await comicService.getWalletComics(wallet);
 
-export default router;
+    res.json({
+      success: true,
+      profile: {
+        ...user,
+        balance: balance.hbar,
+        totalComics: comics.totalCollections,
+        collections: comics.collections,
+      },
+    });
+  } catch (error) {
+    console.error("Get profile error:", error);
+    res.status(500).json({
+      success: false,
+      error: error.message,
+    });
+  }
+});
+
+/**
+ * POST /api/auth/disconnect
+ * Disconnect wallet
+ */
+authRouter.post("/disconnect", (req, res) => {
+  try {
+    const { walletAddress } = req.body;
+
+    if (!walletAddress) {
+      return res.status(400).json({
+        success: false,
+        error: "Wallet address is required",
+      });
+    }
+
+    sessions.delete(walletAddress);
+
+    res.json({
+      success: true,
+      message: "Wallet disconnected successfully",
+    });
+  } catch (error) {
+    console.error("Disconnect wallet error:", error);
+    res.status(500).json({
+      success: false,
+      error: error.message,
+    });
+  }
+});
+
+/**
+ * GET /api/auth/verify/:wallet
+ * Verify if wallet session is active
+ */
+authRouter.get("/verify/:wallet", (req, res) => {
+  try {
+    const { wallet } = req.params;
+    const user = sessions.get(wallet);
+
+    res.json({
+      success: true,
+      isConnected: !!user,
+      ...(user && { user }),
+    });
+  } catch (error) {
+    console.error("Verify session error:", error);
+    res.status(500).json({
+      success: false,
+      error: error.message,
+    });
+  }
+});
+
+export default authRouter;

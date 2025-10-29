@@ -2,7 +2,6 @@ import express from "express";
 import multer from "multer";
 import fs from "fs";
 import comicService from "../services/comicService.js";
-import { authenticateToken } from "./auth.js";
 
 const router = express.Router();
 
@@ -27,14 +26,13 @@ const storage = multer.diskStorage({
 const upload = multer({
   storage,
   limits: { fileSize: 10 * 1024 * 1024 }, // 10MB limit
-  
-     fileFilter : (req, file, cb) => {
-  const allowedTypes = ["image/jpeg", "image/png", "image/webp", "application/octet-stream"];
-  if (!allowedTypes.includes(file.mimetype)) {
-    return cb(new Error("Invalid file type. Only JPEG, PNG, and WEBP allowed."));
-  }}
-
-
+  fileFilter: (req, file, cb) => {
+    const allowedTypes = ["image/jpeg", "image/png", "image/webp", "application/octet-stream"];
+    if (!allowedTypes.includes(file.mimetype)) {
+      return cb(new Error("Invalid file type. Only JPEG, PNG, and WEBP allowed."));
+    }
+    cb(null, true);
+  }
 });
 
 /**
@@ -42,10 +40,32 @@ const upload = multer({
  * Create a new comic collection
  */
 router.post("/collections", upload.single("coverImage"), async (req, res) => {
-    console.log("3️⃣ File uploaded or processed");
+  try {
+    // Collect data from either JSON body or form-data
+    const data = req.body;
 
+    // If a file was uploaded, set its path
+    if (req.file) data.coverImage = req.file.path;
+
+    // Create the collection via comicService
+    const collection = await comicService.createCollection({
+      ...data,
+      creator: data.creator || "0.0.1234"
+    });
+
+    res.status(201).json({
+      success: true,
+      message: "Collection created successfully",
+      data: collection
+    });
+  } catch (error) {
+    console.error("❌ Error creating collection:", error);
+    res.status(500).json({
+      success: false,
+      message: error.message || "Failed to create collection"
+    });
   }
-);
+});
 
 /**
  * POST /api/comics
@@ -53,7 +73,6 @@ router.post("/collections", upload.single("coverImage"), async (req, res) => {
  */
 router.post(
   "/",
-  authenticateToken,
   upload.fields([
     { name: "coverImage", maxCount: 1 },
     { name: "pages", maxCount: 50 }
@@ -70,7 +89,7 @@ router.post(
         attributes
       } = req.body;
 
-      const creator = req.user.accountId;
+      const creator = "0.0.1234"; // Placeholder until authentication added
       const coverImage = req.files.coverImage?.[0]?.path;
       const pages = req.files.pages?.map(file => file.path) || [];
 
@@ -113,7 +132,7 @@ router.post(
  * POST /api/comics/:tokenId/mint
  * Mint additional copies of existing comic
  */
-router.post("/:tokenId/mint", authenticateToken, async (req, res) => {
+router.post("/:tokenId/mint", async (req, res) => {
   try {
     const { tokenId } = req.params;
     const { metadataIPFSHash, copies } = req.body;
@@ -234,9 +253,7 @@ router.get("/creator/:accountId", async (req, res) => {
   try {
     const { accountId } = req.params;
 
-    const comics = await comicService.listComicsByCreator({
-      creatorAccount: accountId
-    });
+    const comics = await comicService.getComicsByCreator(accountId);
 
     res.status(200).json({
       success: true,

@@ -3,17 +3,26 @@ import FormData from 'form-data';
 import fs from 'fs';
 import sharp from 'sharp';
 import archiver from 'archiver';
+import { Web3Storage, File } from 'web3.storage';
 
 class IPFSService {
   constructor() {
     this.pinataApiKey = process.env.PINATA_API_KEY;
-    this.pinataSecretKey = process.env.PINATA_SECRET_KEY;
+    this.pinataSecretKey = process.env.PINATA_SECRET_API_KEY;
+    this.web3Token = process.env.WEB3_STORAGE_TOKEN;
     this.gatewayUrl = process.env.IPFS_GATEWAY_URL || 'https://ipfs.io/ipfs/';
     this.isInitialized = false;
+    this.web3Client = null;
   }
 
+  /** Initialize the service and test connections */
   async initialize() {
     try {
+      if (this.web3Token && this.web3Token !== 'your_web3_storage_token') {
+        this.web3Client = new Web3Storage({ token: this.web3Token });
+        console.log('✅ Web3.Storage initialized');
+      }
+
       if (
         this.pinataApiKey &&
         this.pinataSecretKey &&
@@ -25,52 +34,49 @@ class IPFSService {
         console.log('⚠️  Pinata credentials not provided, using demo mode');
       }
 
-      console.log('🌐 Using Pinata-only mode (Web3.Storage disabled)');
+      if (!this.web3Client && !this.pinataApiKey) {
+        console.log('⚠️  Running in local demo mode (no upload)');
+      }
+
       this.isInitialized = true;
       return true;
     } catch (error) {
       console.error('❌ Failed to initialize IPFS service:', error);
-      console.log('⚠️  Running in demo mode without IPFS connection');
-      this.isInitialized = true;
+      this.isInitialized = true; // still let app run in demo mode
       return true;
     }
   }
 
+  /** Verify Pinata API connection */
   async testPinataConnection() {
     try {
       const response = await axios.get('https://api.pinata.cloud/data/testAuthentication', {
         headers: {
-          'pinata_api_key': this.pinataApiKey,
-          'pinata_secret_api_key': this.pinataSecretKey,
+          pinata_api_key: this.pinataApiKey,
+          pinata_secret_api_key: this.pinataSecretKey,
         },
       });
 
-      if (response.status !== 200) {
-        throw new Error('Pinata authentication failed');
-      }
+      if (response.status !== 200) throw new Error('Pinata authentication failed');
     } catch (error) {
       throw new Error(`Pinata connection failed: ${error.message}`);
     }
   }
 
+  /** Upload a file (Buffer or path) to Pinata */
   async uploadToPinata(fileData, fileName, metadata = {}) {
     try {
       const formData = new FormData();
 
       if (Buffer.isBuffer(fileData)) {
-        formData.append('file', fileData, fileName);
+        formData.append('file', fileData, { filename: fileName });
       } else {
         formData.append('file', fs.createReadStream(fileData), fileName);
       }
 
-      const pinataMetadata = {
-        name: fileName,
-        keyvalues: metadata,
-      };
+      const pinataMetadata = { name: fileName, keyvalues: metadata };
       formData.append('pinataMetadata', JSON.stringify(pinataMetadata));
-
-      const pinataOptions = { cidVersion: 1 };
-      formData.append('pinataOptions', JSON.stringify(pinataOptions));
+      formData.append('pinataOptions', JSON.stringify({ cidVersion: 1 }));
 
       const response = await axios.post(
         'https://api.pinata.cloud/pinning/pinFileToIPFS',
@@ -78,8 +84,8 @@ class IPFSService {
         {
           headers: {
             ...formData.getHeaders(),
-            'pinata_api_key': this.pinataApiKey,
-            'pinata_secret_api_key': this.pinataSecretKey,
+            pinata_api_key: this.pinataApiKey,
+            pinata_secret_api_key: this.pinataSecretKey,
           },
           maxContentLength: Infinity,
           maxBodyLength: Infinity,
@@ -88,80 +94,54 @@ class IPFSService {
 
       return {
         hash: response.data.IpfsHash,
+        url: `${this.gatewayUrl}${response.data.IpfsHash}`,
         size: response.data.PinSize,
         timestamp: response.data.Timestamp,
-        url: `${this.gatewayUrl}${response.data.IpfsHash}`,
       };
     } catch (error) {
-      console.error('❌ Failed to upload to Pinata:', error);
+      console.error('❌ Failed to upload to Pinata:', error.response?.data || error.message);
       throw error;
     }
   }
 
+  /** Upload JSON metadata */
   async uploadMetadata(metadata, fileName = 'metadata.json') {
-    try {
-      const jsonString = JSON.stringify(metadata, null, 2);
-      const buffer = Buffer.from(jsonString, 'utf8');
-
-      return await this.uploadToPinata(buffer, fileName, {
-        type: 'metadata',
-        timestamp: new Date().toISOString(),
-      });
-    } catch (error) {
-      console.error('❌ Failed to upload metadata:', error);
-      throw error;
-    }
+    const json = JSON.stringify(metadata, null, 2);
+    const buffer = Buffer.from(json, 'utf8');
+    return this.uploadToPinata(buffer, fileName, { type: 'metadata' });
   }
 
+  /** Upload comic pages (with thumbnail/web/print + CBZ) */
   async uploadComicPages(pageFiles, comicMetadata) {
     try {
       const processedPages = [];
-      const thumbnailHashes = [];
-      const webHashes = [];
-      const printHashes = [];
 
       for (let i = 0; i < pageFiles.length; i++) {
         const pageFile = pageFiles[i];
         const pageNumber = i + 1;
 
-        console.log(`Processing page ${pageNumber}/${pageFiles.length}...`);
+        console.log(`📄 Processing page ${pageNumber}/${pageFiles.length}`);
 
-        const thumbnailBuffer = await this.resizeImage(pageFile, 'thumbnail');
+        const thumbBuffer = await this.resizeImage(pageFile, 'thumbnail');
         const webBuffer = await this.resizeImage(pageFile, 'web');
         const printBuffer = await this.resizeImage(pageFile, 'print');
 
-        const thumbnailResult = await this.uploadToPinata(
-          thumbnailBuffer,
-          `page-${pageNumber.toString().padStart(2, '0')}-thumb.jpg`,
-          { type: 'thumbnail', page: pageNumber }
-        );
-
-        const webResult = await this.uploadToPinata(
-          webBuffer,
-          `page-${pageNumber.toString().padStart(2, '0')}-web.jpg`,
-          { type: 'web', page: pageNumber }
-        );
-
-        const printResult = await this.uploadToPinata(
-          printBuffer,
-          `page-${pageNumber.toString().padStart(2, '0')}-print.jpg`,
-          { type: 'print', page: pageNumber }
-        );
+        const [thumb, web, print] = await Promise.all([
+          this.uploadToPinata(thumbBuffer, `page-${pageNumber}-thumb.jpg`, { type: 'thumbnail' }),
+          this.uploadToPinata(webBuffer, `page-${pageNumber}-web.jpg`, { type: 'web' }),
+          this.uploadToPinata(printBuffer, `page-${pageNumber}-print.jpg`, { type: 'print' }),
+        ]);
 
         processedPages.push({
           pageNumber,
-          thumbnail: thumbnailResult,
-          web: webResult,
-          print: printResult,
+          thumbnail: thumb,
+          web: web,
+          print: print,
         });
-
-        thumbnailHashes.push(thumbnailResult.hash);
-        webHashes.push(webResult.hash);
-        printHashes.push(printResult.hash);
       }
 
-      const cbzBuffer = await this.createCBZArchive(printHashes, comicMetadata);
-      const cbzResult = await this.uploadToPinata(
+      const cbzBuffer = await this.createCBZArchive(processedPages, comicMetadata);
+      const cbz = await this.uploadToPinata(
         cbzBuffer,
         `${comicMetadata.name.replace(/\s+/g, '-')}.cbz`,
         { type: 'cbz', pages: pageFiles.length }
@@ -169,66 +149,51 @@ class IPFSService {
 
       return {
         pages: processedPages,
-        cbz: cbzResult,
+        cbz,
         totalPages: pageFiles.length,
         uploadedAt: new Date().toISOString(),
       };
     } catch (error) {
-      console.error('❌ Failed to upload comic pages:', error);
+      console.error('❌ uploadComicPages failed:', error);
       throw error;
     }
   }
 
+  /** Resize images for each display mode */
   async resizeImage(input, format) {
+    const sizes = {
+      thumbnail: { width: 400, height: 600, quality: 80 },
+      web: { width: 1200, height: 1800, quality: 90 },
+      print: { width: 2048, height: 3072, quality: 95 },
+    };
+
+    const config = sizes[format];
+    if (!config) throw new Error(`Invalid resize format: ${format}`);
+
     try {
-      const formats = {
-        thumbnail: { width: 400, height: 600, quality: 80 },
-        web: { width: 1200, height: 1800, quality: 90 },
-        print: { width: 2048, height: 3072, quality: 95 },
-      };
+      const image = sharp(input);
+      const meta = await image.metadata();
 
-      const config = formats[format];
-      if (!config) throw new Error(`Unknown format: ${format}`);
+      const ratio = meta.width / meta.height;
+      let width = config.width;
+      let height = Math.round(width / ratio);
+      if (height > config.height) {
+        height = config.height;
+        width = Math.round(height * ratio);
+      }
 
-      const sharpInstance = sharp(input);
-      const metadata = await sharpInstance.metadata();
-
-      const { width, height } = this.calculateOptimalDimensions(
-        metadata.width,
-        metadata.height,
-        config.width,
-        config.height
-      );
-
-      const buffer = await sharpInstance
+      return await image
         .resize(width, height, { fit: 'inside', withoutEnlargement: true })
         .jpeg({ quality: config.quality, progressive: true })
         .toBuffer();
-
-      return buffer;
-    } catch (error) {
-      console.error(`❌ Failed to resize image for ${format}:`, error);
-      throw error;
+    } catch (err) {
+      console.error(`❌ resizeImage (${format}) failed:`, err);
+      throw err;
     }
   }
 
-  calculateOptimalDimensions(originalWidth, originalHeight, maxWidth, maxHeight) {
-    const aspectRatio = originalWidth / originalHeight;
-    let width = maxWidth;
-    let height = maxWidth / aspectRatio;
-
-    if (height > maxHeight) {
-      height = maxHeight;
-      width = maxHeight * aspectRatio;
-    }
-
-    return {
-      width: Math.round(width),
-      height: Math.round(height),
-    };
-  }
-
-  async createCBZArchive(pageHashes, metadata) {
+  /** Create a .cbz (zip) archive for the comic */
+  async createCBZArchive(pages, metadata) {
     return new Promise((resolve, reject) => {
       const archive = archiver('zip', { zlib: { level: 9 } });
       const chunks = [];
@@ -237,81 +202,78 @@ class IPFSService {
       archive.on('end', () => resolve(Buffer.concat(chunks)));
       archive.on('error', reject);
 
+      // Add metadata file
       archive.append(JSON.stringify(metadata, null, 2), { name: 'metadata.json' });
 
-      pageHashes.forEach((hash, index) => {
-        const pageNumber = index + 1;
-        archive.append(`Page ${pageNumber} placeholder`, {
-          name: `page-${pageNumber.toString().padStart(2, '0')}.jpg`,
-        });
+      // Add placeholder page entries
+      pages.forEach((p) => {
+        archive.append(`Page ${p.pageNumber}`, { name: `page-${p.pageNumber}.jpg` });
       });
 
       archive.finalize();
     });
   }
 
+  /** Retrieve raw data from IPFS */
   async retrieveFromIPFS(hash) {
+    const url = `${this.gatewayUrl}${hash}`;
     try {
-      const response = await axios.get(`${this.gatewayUrl}${hash}`, {
-        responseType: 'arraybuffer',
-        timeout: 30000,
-      });
-      return Buffer.from(response.data);
-    } catch (error) {
-      console.error(`❌ Failed to retrieve from IPFS: ${hash}`, error);
-      throw error;
+      const res = await axios.get(url, { responseType: 'arraybuffer' });
+      return Buffer.from(res.data);
+    } catch (err) {
+      console.error(`❌ retrieveFromIPFS failed for ${hash}:`, err.message);
+      throw err;
     }
   }
 
+  /** Get file metadata */
   async getFileMetadata(hash) {
     try {
       const response = await axios.head(`${this.gatewayUrl}${hash}`);
       return {
         hash,
         contentType: response.headers['content-type'],
-        contentLength: response.headers['content-length'],
+        size: response.headers['content-length'],
         lastModified: response.headers['last-modified'],
         url: `${this.gatewayUrl}${hash}`,
       };
     } catch (error) {
-      console.error(`❌ Failed to get file metadata: ${hash}`, error);
+      console.error('❌ getFileMetadata failed:', error.message);
       throw error;
     }
   }
 
+  /** Pin an existing hash on Pinata */
   async pinHash(hash, name) {
     try {
       const response = await axios.post(
         'https://api.pinata.cloud/pinning/pinByHash',
-        {
-          hashToPin: hash,
-          pinataMetadata: { name },
-        },
+        { hashToPin: hash, pinataMetadata: { name } },
         {
           headers: {
             'pinata_api_key': this.pinataApiKey,
             'pinata_secret_api_key': this.pinataSecretKey,
-            'Content-Type': 'application/json',
           },
         }
       );
-
       return {
         hash,
         name,
-        pinnedAt: new Date().toISOString(),
         requestId: response.data.requestId,
+        pinnedAt: new Date().toISOString(),
       };
-    } catch (error) {
-      console.error(`❌ Failed to pin hash: ${hash}`, error);
-      throw error;
+    } catch (err) {
+      console.error('❌ pinHash failed:', err.message);
+      throw err;
     }
   }
 
+  /** Status report */
   getStatus() {
     return {
       isInitialized: this.isInitialized,
       pinataConfigured: !!(this.pinataApiKey && this.pinataSecretKey),
+      web3Configured: !!this.web3Token,
       gatewayUrl: this.gatewayUrl,
       timestamp: new Date().toISOString(),
     };

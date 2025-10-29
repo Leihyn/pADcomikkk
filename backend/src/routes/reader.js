@@ -1,355 +1,116 @@
 import express from "express";
 import comicService from "../services/comicService.js";
-import hederaService from "../services/hederaService.js";
-import { authenticateToken } from "./auth.js";
+import ipfsService from "../services/ipfsService.js";
 
 const router = express.Router();
 
-// In-memory storage for reading progress and bookmarks
-const readingProgress = new Map();
-const bookmarks = new Map();
-
 /**
- * GET /api/reader/library/:accountId
- * Get user's owned comics
+ * GET /api/reader/library/:wallet
+ * Get all comics owned by wallet (reader's library)
  */
-router.get("/library/:accountId", async (req, res) => {
+router.get("/library/:wallet", async (req, res) => {
   try {
-    const { accountId } = req.params;
+    const { wallet } = req.params;
 
-    // Get account balance to see owned tokens
-    const balance = await hederaService.getBalance(accountId);
-    
-    // Extract token IDs from balance
-    const ownedTokens = [];
-    if (balance.tokens) {
-      for (const [tokenId, amount] of balance.tokens.entries()) {
-        if (amount.toNumber() > 0) {
-          ownedTokens.push({
-            tokenId: tokenId.toString(),
-            quantity: amount.toNumber()
-          });
-        }
-      }
-    }
+    const result = await comicService.getWalletComics(wallet);
 
-    res.status(200).json({
-      success: true,
-      data: {
-        accountId,
-        library: ownedTokens,
-        total: ownedTokens.length
-      }
-    });
+    res.json(result);
   } catch (error) {
-    console.error("Error fetching library:", error);
+    console.error("Get library error:", error);
     res.status(500).json({
       success: false,
-      message: error.message || "Failed to fetch library"
+      error: error.message,
     });
   }
 });
 
 /**
- * GET /api/reader/access/:tokenId
- * Check access to comic
+ * POST /api/reader/access
+ * Verify access and get comic content
  */
-router.get("/access/:tokenId", authenticateToken, async (req, res) => {
+router.post("/access", async (req, res) => {
   try {
-    const { tokenId } = req.params;
-    const { serial } = req.query;
-    const accountId = req.user.accountId;
+    const { wallet, tokenId, serialNumber } = req.body;
 
-    // Verify ownership and get access
-    const access = await comicService.verifyAccess({
-      accountId,
-      tokenId,
-      serial: serial ? parseInt(serial) : undefined
-    });
-
-    if (!access.hasAccess) {
-      return res.status(403).json({
-        success: false,
-        message: access.message || "Access denied"
-      });
-    }
-
-    res.status(200).json({
-      success: true,
-      data: access
-    });
-  } catch (error) {
-    console.error("Error checking access:", error);
-    res.status(500).json({
-      success: false,
-      message: error.message || "Failed to check access"
-    });
-  }
-});
-
-/**
- * GET /api/reader/content/:tokenId
- * Get comic content (token-gated)
- */
-router.get("/content/:tokenId", authenticateToken, async (req, res) => {
-  try {
-    const { tokenId } = req.params;
-    const { serial } = req.query;
-    const accountId = req.user.accountId;
-
-    // Verify access
-    const access = await comicService.verifyAccess({
-      accountId,
-      tokenId,
-      serial: serial ? parseInt(serial) : undefined
-    });
-
-    if (!access.hasAccess) {
-      return res.status(403).json({
-        success: false,
-        message: "You do not own this comic"
-      });
-    }
-
-    res.status(200).json({
-      success: true,
-      data: access.comic
-    });
-  } catch (error) {
-    console.error("Error fetching content:", error);
-    res.status(500).json({
-      success: false,
-      message: error.message || "Failed to fetch content"
-    });
-  }
-});
-
-/**
- * POST /api/reader/progress
- * Save reading progress
- */
-router.post("/progress", authenticateToken, async (req, res) => {
-  try {
-    const { tokenId, serial, currentPage, totalPages } = req.body;
-    const accountId = req.user.accountId;
-
-    if (!tokenId || currentPage === undefined) {
+    if (!wallet || !tokenId || !serialNumber) {
       return res.status(400).json({
         success: false,
-        message: "Token ID and current page are required"
+        error: "Missing required fields",
       });
     }
 
-    const progressKey = `${accountId}-${tokenId}-${serial || 1}`;
-    const progress = {
-      accountId,
+    // Verify ownership
+    const ownership = await comicService.verifyOwnership(
+      wallet,
       tokenId,
-      serial: serial || 1,
-      currentPage: parseInt(currentPage),
-      totalPages: parseInt(totalPages),
-      percentage: totalPages ? Math.round((currentPage / totalPages) * 100) : 0,
-      lastRead: new Date().toISOString()
-    };
+      parseInt(serialNumber)
+    );
 
-    readingProgress.set(progressKey, progress);
-
-    res.status(200).json({
-      success: true,
-      message: "Progress saved",
-      data: progress
-    });
-  } catch (error) {
-    console.error("Error saving progress:", error);
-    res.status(500).json({
-      success: false,
-      message: error.message || "Failed to save progress"
-    });
-  }
-});
-
-/**
- * GET /api/reader/progress/:tokenId
- * Get reading progress
- */
-router.get("/progress/:tokenId", authenticateToken, async (req, res) => {
-  try {
-    const { tokenId } = req.params;
-    const { serial } = req.query;
-    const accountId = req.user.accountId;
-
-    const progressKey = `${accountId}-${tokenId}-${serial || 1}`;
-    const progress = readingProgress.get(progressKey);
-
-    if (!progress) {
-      return res.status(200).json({
-        success: true,
-        data: {
-          currentPage: 1,
-          percentage: 0
-        }
-      });
-    }
-
-    res.status(200).json({
-      success: true,
-      data: progress
-    });
-  } catch (error) {
-    console.error("Error fetching progress:", error);
-    res.status(500).json({
-      success: false,
-      message: error.message || "Failed to fetch progress"
-    });
-  }
-});
-
-/**
- * POST /api/reader/bookmark
- * Add bookmark
- */
-router.post("/bookmark", authenticateToken, async (req, res) => {
-  try {
-    const { tokenId, serial, pageNumber, note } = req.body;
-    const accountId = req.user.accountId;
-
-    if (!tokenId || pageNumber === undefined) {
-      return res.status(400).json({
+    if (!ownership.isOwner) {
+      return res.status(403).json({
         success: false,
-        message: "Token ID and page number are required"
+        error: "You do not own this comic",
+        isOwner: false,
       });
     }
 
-    const bookmarkKey = `${accountId}-${tokenId}`;
-    let userBookmarks = bookmarks.get(bookmarkKey) || [];
-
-    const bookmark = {
-      id: `${Date.now()}-${Math.random().toString(36).substr(2, 9)}`,
+    // Get comic details with pages
+    const comic = await comicService.getComicDetails(
       tokenId,
-      serial: serial || 1,
-      pageNumber: parseInt(pageNumber),
-      note: note || "",
-      createdAt: new Date().toISOString()
-    };
+      parseInt(serialNumber)
+    );
 
-    userBookmarks.push(bookmark);
-    bookmarks.set(bookmarkKey, userBookmarks);
-
-    res.status(201).json({
+    res.json({
       success: true,
-      message: "Bookmark added",
-      data: bookmark
+      hasAccess: true,
+      comic,
     });
   } catch (error) {
-    console.error("Error adding bookmark:", error);
+    console.error("Access verification error:", error);
     res.status(500).json({
       success: false,
-      message: error.message || "Failed to add bookmark"
+      error: error.message,
     });
   }
 });
 
 /**
- * GET /api/reader/bookmarks/:tokenId
- * Get bookmarks for comic
+ * GET /api/reader/comic/:tokenId/:serialNumber
+ * Get comic reader data
  */
-router.get("/bookmarks/:tokenId", authenticateToken, async (req, res) => {
+router.get("/comic/:tokenId/:serialNumber", async (req, res) => {
   try {
-    const { tokenId } = req.params;
-    const accountId = req.user.accountId;
+    const { tokenId, serialNumber } = req.params;
+    const { wallet } = req.query;
 
-    const bookmarkKey = `${accountId}-${tokenId}`;
-    const userBookmarks = bookmarks.get(bookmarkKey) || [];
+    // Verify ownership if wallet provided
+    if (wallet) {
+      const ownership = await comicService.verifyOwnership(
+        wallet,
+        tokenId,
+        parseInt(serialNumber)
+      );
 
-    res.status(200).json({
-      success: true,
-      data: {
-        bookmarks: userBookmarks,
-        total: userBookmarks.length
-      }
-    });
-  } catch (error) {
-    console.error("Error fetching bookmarks:", error);
-    res.status(500).json({
-      success: false,
-      message: error.message || "Failed to fetch bookmarks"
-    });
-  }
-});
-
-/**
- * DELETE /api/reader/bookmark/:bookmarkId
- * Delete bookmark
- */
-router.delete("/bookmark/:bookmarkId", authenticateToken, async (req, res) => {
-  try {
-    const { bookmarkId } = req.params;
-    const accountId = req.user.accountId;
-
-    // Find and delete bookmark
-    let deleted = false;
-    for (const [key, userBookmarks] of bookmarks.entries()) {
-      if (key.startsWith(accountId)) {
-        const index = userBookmarks.findIndex(b => b.id === bookmarkId);
-        if (index !== -1) {
-          userBookmarks.splice(index, 1);
-          bookmarks.set(key, userBookmarks);
-          deleted = true;
-          break;
-        }
+      if (!ownership.isOwner) {
+        return res.status(403).json({
+          success: false,
+          error: "Access denied. You must own this comic to read it.",
+        });
       }
     }
 
-    if (!deleted) {
-      return res.status(404).json({
-        success: false,
-        message: "Bookmark not found"
-      });
-    }
+    // Get comic details
+    const result = await comicService.getComicDetails(
+      tokenId,
+      parseInt(serialNumber)
+    );
 
-    res.status(200).json({
-      success: true,
-      message: "Bookmark deleted"
-    });
+    res.json(result);
   } catch (error) {
-    console.error("Error deleting bookmark:", error);
+    console.error("Get comic error:", error);
     res.status(500).json({
       success: false,
-      message: error.message || "Failed to delete bookmark"
-    });
-  }
-});
-
-/**
- * GET /api/reader/reading-list
- * Get user's reading list with progress
- */
-router.get("/reading-list", authenticateToken, async (req, res) => {
-  try {
-    const accountId = req.user.accountId;
-
-    // Get all progress for user
-    const userProgress = [];
-    for (const [key, progress] of readingProgress.entries()) {
-      if (key.startsWith(accountId)) {
-        userProgress.push(progress);
-      }
-    }
-
-    // Sort by last read
-    userProgress.sort((a, b) => new Date(b.lastRead) - new Date(a.lastRead));
-
-    res.status(200).json({
-      success: true,
-      data: {
-        readingList: userProgress,
-        total: userProgress.length
-      }
-    });
-  } catch (error) {
-    console.error("Error fetching reading list:", error);
-    res.status(500).json({
-      success: false,
-      message: error.message || "Failed to fetch reading list"
+      error: error.message,
     });
   }
 });

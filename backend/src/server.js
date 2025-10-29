@@ -1,154 +1,192 @@
+import dotenv from "dotenv";
 import express from "express";
-import multer from "multer";
 import cors from "cors";
 import helmet from "helmet";
 import morgan from "morgan";
-import dotenv from "dotenv";
-import path from "path";
-import { fileURLToPath } from "url";
-import fs from "fs";
-
-// Import routes
-import authRoutes from "./routes/auth.js";
-import comicsRoutes from "./routes/comics.js";
-import marketplaceRoutes from "./routes/marketplace.js";
-import readerRoutes from "./routes/reader.js";
+import rateLimit from "express-rate-limit";
 
 // Import services
 import hederaService from "./services/hederaService.js";
 import ipfsService from "./services/ipfsService.js";
 
+// Import routes
+import comicsRoutes from "./routes/comics.js";
+import marketplaceRoutes from "./routes/marketplace.js";
+import readerRoutes from "./routes/reader.js";
+import authRoutes from "./routes/auth.js";
+
 // Load environment variables
 dotenv.config();
 
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = path.dirname(__filename);
-
-// Create Express app
 const app = express();
 const PORT = process.env.PORT || 3001;
 
-// Ensure uploads directory exists
-const uploadsDir = path.join(__dirname, "../uploads");
-if (!fs.existsSync(uploadsDir)) {
-  fs.mkdirSync(uploadsDir, { recursive: true });
-}
+// ============================================
+// MIDDLEWARE SETUP
+// ============================================
 
-// Middleware
-app.use(helmet()); // Security headers
-app.use(cors()); // Enable CORS
-app.use(express.json({ limit: "10mb" })); // Parse JSON bodies
-app.use(express.urlencoded({ extended: true, limit: "10mb" })); // Parse URL-encoded bodies
-app.use(morgan("dev")); // HTTP request logger
-app.use((err, req, res, next) => {
-  console.error("🔥 Global error:", err);
-  if (err instanceof multer.MulterError || err.message.includes("Invalid file type")) {
-    return res.status(400).json({ success: false, message: err.message });
-  }
-  res.status(500).json({ success: false, message: "Server error" });
+// Security headers
+app.use(helmet());
+
+// CORS configuration
+app.use(
+  cors({
+    origin: process.env.FRONTEND_URL || "http://localhost:5173",
+    credentials: true,
+  })
+);
+
+// Body parsing
+app.use(express.json({ limit: "10mb" }));
+app.use(express.urlencoded({ extended: true, limit: "10mb" }));
+
+// Logging
+app.use(
+  morgan(process.env.NODE_ENV === "development" ? "dev" : "combined")
+);
+
+// Rate limiting
+const limiter = rateLimit({
+  windowMs: 15 * 60 * 1000, // 15 minutes
+  max: 100,
+  message: "Too many requests from this IP, please try again later.",
 });
+app.use("/api/", limiter);
 
-app.use((req, res, next) => {
-  console.log(`➡️  ${req.method} ${req.originalUrl}`);
-  next();
+// Upload-specific limiter
+const uploadLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  max: 10,
+  message: "Too many uploads from this IP, please try again later.",
 });
+app.use("/api/comics/collections", uploadLimiter);
+app.use("/api/comics/issues", uploadLimiter);
+app.use("/api/comics/upload-pages", uploadLimiter);
 
+// ============================================
+// ROUTES
+// ============================================
 
-// Static files (for uploaded content)
-app.use("/uploads", express.static(uploadsDir));
-
-// Health check endpoint
-app.get("/health", (req, res) => {
-  res.status(200).json({
-    success: true,
-    message: "Comic Pad API is running",
-    timestamp: new Date().toISOString(),
-    version: "1.0.0"
-  });
-});
-
-// API Routes
-app.use("/api/auth", authRoutes);
-app.use("/api/comics", comicsRoutes);
-app.use("/api/marketplace", marketplaceRoutes);
-app.use("/api/reader", readerRoutes);
-
-// Root endpoint
 app.get("/", (req, res) => {
   res.json({
     success: true,
-    message: "Welcome to Comic Pad API",
+    message: "🎨 Comic Pad API Server",
     version: "1.0.0",
-    endpoints: {
-      auth: "/api/auth",
-      comics: "/api/comics",
-      marketplace: "/api/marketplace",
-      reader: "/api/reader",
-      health: "/health"
-    },
-    documentation: "https://docs.comicpad.app"
+    timestamp: new Date().toISOString(),
   });
 });
+
+// Health check route
+app.get("/health", async (req, res) => {
+  const result = {
+    success: true,
+    services: {
+      hedera: "unknown",
+      ipfs: "unknown",
+      api: "healthy",
+    },
+    uptimeSeconds: process.uptime(),
+    timestamp: new Date().toISOString(),
+  };
+
+  try {
+    // Hedera
+    const hederaStatus = hederaService.getHealthStatus();
+    result.services.hedera = hederaStatus === "healthy" ? "healthy" : "unhealthy";
+    if (hederaStatus !== "healthy" && hederaStatus !== "demo") result.success = false;
+
+    // IPFS
+    const ipfsStatus = ipfsService.getStatus();
+    result.services.ipfs = ipfsStatus.isInitialized ? "healthy" : "unhealthy";
+    if (!ipfsStatus.isInitialized) result.success = false;
+
+    res.status(result.success ? 200 : 503).json(result);
+  } catch (error) {
+    console.error("❌ Health check error:", error);
+    res.status(500).json({
+      success: false,
+      error: error.message,
+      timestamp: new Date().toISOString(),
+    });
+  }
+});
+
+// Register API routes
+app.use("/api/comics", comicsRoutes);
+app.use("/api/marketplace", marketplaceRoutes);
+app.use("/api/reader", readerRoutes);
+app.use("/api/auth", authRoutes);
 
 // 404 handler
 app.use((req, res) => {
   res.status(404).json({
     success: false,
-    message: "Route not found",
-    path: req.path
+    error: "Route not found",
+    path: req.path,
   });
 });
 
-// Error handler
+// Global error handler
 app.use((err, req, res, next) => {
   console.error("Error:", err);
 
-  // Handle multer errors
   if (err.code === "LIMIT_FILE_SIZE") {
-    return res.status(400).json({
+    return res.status(413).json({
       success: false,
-      message: "File too large. Maximum size is 10MB"
+      error: "File too large. Max size: 50MB.",
     });
   }
 
   res.status(err.status || 500).json({
     success: false,
-    message: err.message || "Internal server error",
-    ...(process.env.NODE_ENV === "development" && { stack: err.stack })
+    error: err.message || "Internal server error",
+    ...(process.env.NODE_ENV === "development" && { stack: err.stack }),
   });
 });
 
-// Initialize services and start server
-async function startServer() {
-  try {
-    console.log("\n🚀 Starting Comic Pad API Server...\n");
+// ============================================
+// SERVICE INITIALIZATION
+// ============================================
 
-    // Initialize Hedera Service
-    console.log("📡 Initializing Hedera Service...");
+async function initializeServices() {
+  console.log("🚀 Initializing Comic Pad services...\n");
+
+  try {
+    console.log("📡 Connecting to Hedera...");
     await hederaService.initialize();
 
-    // Test IPFS connection
-    console.log("📦 Testing IPFS connection...");
+    console.log("📦 Connecting to IPFS (Pinata/Web3.Storage)...");
     await ipfsService.initialize();
 
-    // Start Express server
-    app.listen(PORT, () => {
-      console.log("\n✅ Comic Pad API Server is running!");
-      console.log(`📍 Server: http://localhost:${PORT}`);
-      console.log(`🏥 Health: http://localhost:${PORT}/health`);
-      console.log(`📚 API: http://localhost:${PORT}/api`);
-      console.log(`\n🌐 Network: ${process.env.HEDERA_NETWORK || "testnet"}`);
-      console.log(`💾 Environment: ${process.env.NODE_ENV || "development"}\n`);
-    });
+    console.log("✅ All services initialized successfully!\n");
   } catch (error) {
-    console.error("\n❌ Failed to start server:", error);
-    process.exit(1);
+    console.error("❌ Service initialization failed:", error.message);
+    console.error("⚠️ Server will still start, but some features may not work.\n");
   }
 }
 
-// Handle graceful shutdown
+// ============================================
+// START SERVER
+// ============================================
+
+async function startServer() {
+  await initializeServices();
+
+  app.listen(PORT, () => {
+    console.log("=".repeat(60));
+    console.log("🎨 Comic Pad API Server");
+    console.log("=".repeat(60));
+    console.log(`🌐 Server running at: http://localhost:${PORT}`);
+    console.log(`📝 Environment: ${process.env.NODE_ENV || "development"}`);
+    console.log(`🔗 Network: ${process.env.HEDERA_NETWORK || "testnet"}`);
+    console.log(`⚡ Ready to accept requests!`);
+    console.log("=".repeat(60));
+  });
+}
+
+// Graceful shutdown
 process.on("SIGTERM", () => {
-  console.log("\n⚠️ SIGTERM received, shutting down gracefully...");
+  console.log("⚠️ SIGTERM received, shutting down gracefully...");
   process.exit(0);
 });
 
@@ -157,7 +195,6 @@ process.on("SIGINT", () => {
   process.exit(0);
 });
 
-// Start the server
 startServer();
 
 export default app;
